@@ -227,7 +227,7 @@ impl SubShardDecoder {
 			// count all segments written, and stop at first segment having enough.
 			let mut run_segments = BTreeMap::new();
 			let mut ok = false;
-			for (_chunk_ix, chunks) in ori.iter().enumerate() {
+			for chunks in ori.iter() {
 				let first = run_segments.is_empty();
 				for (segment_i, _chunk) in chunks {
 					if !processed_segments.contains(segment_i) {
@@ -235,12 +235,10 @@ impl SubShardDecoder {
 							if !processed_segments.contains(segment_i) {
 								run_segments.insert(*segment_i, 1);
 							}
-						} else {
-							if let Some(c) = run_segments.get_mut(&segment_i) {
-								*c += 1;
-								if *c == N_SHARDS {
-									ok = true;
-								}
+						} else if let Some(c) = run_segments.get_mut(segment_i) {
+							*c += 1;
+							if *c == N_SHARDS {
+								ok = true;
 							}
 						}
 					}
@@ -357,10 +355,8 @@ impl SubShardDecoder {
 				let chunk_start = i * SEGMENT_SIZE_ALIGNED;
 				let original = ori_chunk_to_data(&ori_map, chunk_start, Some(SEGMENT_SIZE))
 					.expect("number of segments checked");
-				result2.push((
-					*segment as u8,
-					Segment { data: Box::new(original), index: *segment as u32 },
-				));
+				result2
+					.push((*segment, Segment { data: Box::new(original), index: *segment as u32 }));
 			}
 		}
 
