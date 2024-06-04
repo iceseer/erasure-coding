@@ -187,28 +187,26 @@ impl SubShardDecoder {
 		I: Iterator<Item = (u8, ChunkIndex, &'a SubShard)>,
 	{
 		let mut ori = vec![Vec::new(); TOTAL_SHARDS];
-		let mut segments = BTreeSet::new();
-		let mut segments2 = BTreeMap::<u8, usize>::new();
+		let mut segments = BTreeMap::<u8, usize>::new();
 		let mut nb_decode = 0;
 
 		// TODO processed and run_segments could be skiped if we are sure to get
 		// correct number of chunks all for the same given chunk ix and segments.
 		for (segment, chunk_index, chunk) in subshards {
 			ori[chunk_index.0 as usize].push((segment, chunk));
-			segments.insert(segment);
-			*segments2.entry(segment).or_default() += 1;
+			*segments.entry(segment).or_default() += 1;
 		}
 
 		// make batches of segments
 		let mut segment_batches = Vec::new();
 
-		let mut processed_segments2 = BTreeSet::new();
+		let mut processed_segments = BTreeSet::new();
 		let mut nb_segments = 0;
-		for (segment, c) in segments2.iter() {
+		for (segment, c) in segments.iter() {
 			if *c >= N_SHARDS {
 				nb_segments += 1;
 			} else {
-				processed_segments2.insert(*segment);
+				processed_segments.insert(*segment);
 			}
 		}
 		while nb_segments > 0 {
@@ -218,9 +216,9 @@ impl SubShardDecoder {
 			for (_chunk_ix, chunks) in ori.iter().enumerate() {
 				let first = run_segments.is_empty();
 				for (segment_i, _chunk) in chunks {
-					if !processed_segments2.contains(segment_i) {
+					if !processed_segments.contains(segment_i) {
 						if first {
-							if !processed_segments2.contains(segment_i) {
+							if !processed_segments.contains(segment_i) {
 								run_segments.insert(*segment_i, 1);
 							}
 						} else {
@@ -243,7 +241,7 @@ impl SubShardDecoder {
 					break;
 				}
 				for (seg, _count) in run_segments.into_iter() {
-					processed_segments2.insert(seg);
+					processed_segments.insert(seg);
 				}
 				continue;
 			}
@@ -251,7 +249,7 @@ impl SubShardDecoder {
 			let mut segment_batch = BTreeSet::new();
 			for (seg, count) in run_segments.into_iter() {
 				if count == N_SHARDS {
-					processed_segments2.insert(seg);
+					processed_segments.insert(seg);
 					segment_batch.insert(seg);
 					if segment_batch.len() == 16 {
 						segment_batches.push(segment_batch);
