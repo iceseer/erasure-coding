@@ -419,5 +419,44 @@ mod tests {
 		assert_eq!(i, 1); // all chunk ix are aligned so can be processed at once.
 		assert_eq!((i_seg1 as u8, segments[i_seg1].clone()), s[0]);
 		assert_eq!((i_seg2 as u8, segments[i_seg2].clone()), s[1]);
+
+		let it1 = (&chunks[i_seg1][0..N_SHARDS / 3])
+			.iter()
+			.enumerate()
+			.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16), c))
+			.chain(
+				(&chunks[i_seg1][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+					.iter()
+					.enumerate()
+					.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
+			)
+			.chain(
+				(&chunks[i_seg1][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+					.iter()
+					.enumerate()
+					.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
+			);
+
+		// unaligned a batch of chunks
+		let it3 = (&chunks[i_seg2][0 + 1..N_SHARDS / 3 + 1])
+			.iter()
+			.enumerate()
+			.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + 1), c))
+			.chain(
+				(&chunks[i_seg2][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+					.iter()
+					.enumerate()
+					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
+			)
+			.chain(
+				(&chunks[i_seg2][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+					.iter()
+					.enumerate()
+					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
+			);
+		let (s, i) = decoder.reconstruct(&mut it1.chain(it3)).unwrap();
+		assert_eq!(i, 2); // not all chunk ix are aligned
+		assert_eq!((i_seg1 as u8, segments[i_seg1].clone()), s[0]);
+		assert_eq!((i_seg2 as u8, segments[i_seg2].clone()), s[1]);
 	}
 }
