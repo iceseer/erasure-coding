@@ -182,6 +182,7 @@ impl SubShardDecoder {
 	{
 		let mut ori = vec![Vec::new(); TOTAL_SHARDS];
 		let mut segments = BTreeSet::new();
+		let mut segments2 = BTreeMap::<u8, usize>::new();
 		let mut nb_decode = 0;
 
 		// TODO processed and run_segments could be skiped if we are sure to get
@@ -190,6 +191,144 @@ impl SubShardDecoder {
 		for (segment, chunk_index, chunk) in subshards {
 			ori[chunk_index.0 as usize].push((segment, chunk));
 			segments.insert(segment);
+			*segments2.entry(segment).or_default() += 1;
+		}
+
+		// make batches of segments
+		let mut segment_batches = Vec::new();
+
+		let mut processed_segments2 = BTreeSet::new();
+		let mut nb_segments = 0;
+		for (segment, c) in segments2.iter() {
+			if *c >= N_SHARDS {
+				nb_segments += 1;
+			} else {
+				processed_segments2.insert(*segment);
+			}
+		}
+		while nb_segments > 0 {
+			// count all segments written, and stop at first segment having enough.
+			let mut run_segments = BTreeMap::new();
+			let mut ok = false;
+			for (_chunk_ix, chunks) in ori.iter().enumerate() {
+				for (segment_i, _chunk) in chunks {
+					if !processed_segments2.contains(segment_i) {
+						if run_segments.is_empty() {
+							if !processed_segments2.contains(segment_i) {
+								run_segments.insert(*segment_i, 1);
+							}
+						} else {
+							if let Some(c) = run_segments.get_mut(&segment_i) {
+								*c += 1;
+								if *c == N_SHARDS {
+									ok = true;
+								}
+							}
+						}
+					}
+				}
+				if ok {
+					break;
+				}
+			}
+			if !ok {
+				if run_segments.is_empty() {
+					// should not happen
+					break;
+				}
+				for (seg, _count) in run_segments.into_iter() {
+					processed_segments2.insert(seg);
+				}
+				continue;
+			}
+			// TODO max size 16, rather [;16] lookup?
+			let mut segment_batch = BTreeSet::new();
+			for (seg, count) in run_segments.into_iter() {
+				if count == N_SHARDS {
+					processed_segments2.insert(seg);
+					segment_batch.insert(seg);
+					if segment_batch.len() == 16 {
+						segment_batches.push(segment_batch);
+						segment_batch = Default::default();
+					}
+				}
+			}
+			if !segment_batch.is_empty() {
+				nb_segments -= segment_batch.len();
+				segment_batches.push(segment_batch);
+			}
+		}
+
+		for chunks in ori.iter_mut() {
+			chunks.sort_by_key(|c| c.0);
+		}
+
+		let mut result2 = Vec::new();
+		// Note that sometime byte could stay set to non zero value, but it does not matter.
+		let mut shard_buff = [0u8; BATCH_SHARD_SIZE];
+		for segments in segment_batches {
+			let mut nb_chunk = 0;
+			let mut ori_map: std::collections::BTreeMap<usize, &[u8]> = Default::default();
+			for (chunk_ix, chunks) in ori.iter().enumerate() {
+				if chunks.is_empty() {
+					continue;
+				}
+				let mut nb = 0;
+				let shard = if chunk_ix < N_SHARDS {
+					let s = &self.shards_ori[chunk_ix] as *const _ as *mut [u8; BATCH_SHARD_SIZE];
+					// each shard are only accessed a single time here.
+					unsafe { s.as_mut().expect("non null") }
+				} else {
+					&mut shard_buff
+				};
+				for (segment_i, chunk) in chunks {
+					if segments.contains(segment_i) {
+						let shard_i_s = nb * SUBSHARD_SIZE / SHARD_MIN_SIZE;
+						let shard_i_r = nb * SUBSHARD_SIZE % SHARD_MIN_SIZE;
+						let mut shard_i = shard_i_s * SHARD_MIN_SIZE + shard_i_r / POINT_SIZE;
+						for point_i in 0..SUBSHARD_POINTS {
+							shard[shard_i] = chunk[point_i * POINT_SIZE];
+							shard[shard_i + POINT_BYTE_SPACING] = chunk[(point_i * POINT_SIZE) + 1];
+							shard_i += 1;
+							if shard_i % POINT_BYTE_SPACING == 0 {
+								shard_i += POINT_BYTE_SPACING;
+							}
+						}
+						nb += 1;
+					}
+				}
+				debug_assert!(nb == 0 || nb == segments.len());
+				if nb > 0 {
+					if chunk_ix < N_SHARDS {
+						self.decoder.add_original_shard(chunk_ix, self.shards_ori[chunk_ix])?;
+						ori_map.insert(chunk_ix, &self.shards_ori[chunk_ix][..]);
+					} else {
+						self.decoder.add_recovery_shard(chunk_ix - N_SHARDS, shard_buff)?;
+					}
+					nb_chunk += 1;
+					if nb_chunk == N_SHARDS {
+						break;
+					}
+				}
+			}
+			debug_assert!(nb_chunk == N_SHARDS);
+			let ori_ret = self.decoder.decode()?;
+			// TODO modify deps to also access original data and avoid self.ori_shards buffer.
+			// Also to avoid instantiating ori_map container.
+			for (i, o) in ori_ret.restored_original_iter() {
+				ori_map.insert(i, o);
+			}
+			debug_assert_eq!(ori_map.len(), N_SHARDS);
+			for (i, segment) in segments.iter().enumerate()  {
+				let chunk_start = i * SEGMENT_SIZE_ALIGNED;
+				let original = ori_chunk_to_data(&ori_map, chunk_start, Some(SEGMENT_SIZE))
+					.expect("number of segments checked");
+				result2.push((
+					*segment as u8,
+					Segment { data: Box::new(original), index: *segment as u32 },
+				));
+			}
+
 		}
 
 		let mut result = Vec::new();
@@ -210,6 +349,10 @@ impl SubShardDecoder {
 			for (chunk_ix, chunks) in ori.iter().enumerate() {
 				let mut added = false;
 				{
+					if chunks.is_empty() {
+						continue;
+					}
+
 					let shard = if chunk_ix < N_SHARDS {
 						let s =
 							&self.shards_ori[chunk_ix] as *const _ as *mut [u8; BATCH_SHARD_SIZE];
@@ -218,9 +361,6 @@ impl SubShardDecoder {
 					} else {
 						&mut shard_buff
 					};
-					if chunks.is_empty() {
-						continue;
-					}
 					for (segment_i, chunk) in chunks {
 						let segment_i = *segment_i as usize;
 						if nb_chunk == 0 {
@@ -295,6 +435,7 @@ impl SubShardDecoder {
 				processed_segments.insert(segment);
 			}
 		}
+		assert_eq!(result, result2); 
 		Ok((result, nb_decode))
 	}
 }
