@@ -4,6 +4,7 @@
 
 mod error;
 mod merklize;
+mod subshard;
 
 pub use self::{
 	error::Error,
@@ -12,6 +13,7 @@ pub use self::{
 
 use scale::{Decode, Encode};
 use std::ops::AddAssign;
+pub use subshard::*;
 
 pub const MAX_CHUNKS: u16 = 16384;
 
