@@ -92,29 +92,29 @@ impl SubShardEncoder {
 	/// Data must be less than MAX_SUB_OPTIMAL_SIZE_DATA.
 	pub fn construct_chunks(
 		&mut self,
-		data: &[Segment],
+		segments: &[Segment],
 	) -> Result<Vec<Box<[SubShard; TOTAL_SHARDS]>>, Error> {
-		if data.len() > SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL {
+		if segments.len() > SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL {
 			return Err(Error::BadPayload);
 		}
-		for (n, s) in data.iter().enumerate() {
+		for (n, s) in segments.iter().enumerate() {
 			if s.index as usize != n {
 				return Err(Error::BadPayload);
 			}
 		}
 		let mut result = vec![
 			Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]);
-			SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL
+			segments.len()
 		];
 
 		let mut shard = [0u8; BATCH_SHARD_SIZE];
 		for shard_a in 0..N_SHARDS {
 			let mut shard_i = 0;
-			for segment_i in 0..data.len() {
+			for segment_i in 0..segments.len() {
 				for point_i in 0..SUBSHARD_POINTS {
 					let data_i = (point_i * N_SHARDS) * 2 + shard_a * 2;
 					let point = if data_i < SEGMENT_SIZE {
-						(data[segment_i].data[data_i], data[segment_i].data[data_i + 1])
+						(segments[segment_i].data[data_i], segments[segment_i].data[data_i + 1])
 					} else {
 						(0, 0)
 					};
@@ -146,6 +146,9 @@ impl SubShardEncoder {
 					result[segment_i][shard_a + N_SHARDS][point_i * 2 + 1] = point.1;
 				}
 				segment_i += 1;
+				if segment_i == segments.len() {
+					break;
+				}
 			}
 		}
 		Ok(result)
