@@ -160,12 +160,16 @@ impl SubShardDecoder {
 	}
 
 	// u8 is the segment number.
-	pub fn reconstruct<'a, I>(&mut self, subshards: &'a mut I) -> Result<Vec<(u8, Segment)>, Error>
+	pub fn reconstruct<'a, I>(
+		&mut self,
+		subshards: &'a mut I,
+	) -> Result<(Vec<(u8, Segment)>, usize), Error>
 	where
 		I: Iterator<Item = (u8, ChunkIndex, &'a SubShard)>,
 	{
 		let mut ori = vec![Vec::new(); TOTAL_SHARDS];
 		let mut segments = BTreeSet::new();
+		let mut nb_decode = 0;
 
 		// TODO processed and run_segments could be skiped if we are sure to get
 		// correct number of chunks all for the same given chunk ix and segments.
@@ -254,6 +258,7 @@ impl SubShardDecoder {
 				continue;
 			}
 			let ori_ret = self.decoder.decode()?;
+			nb_decode += 1;
 			for (i, o) in ori_ret.restored_original_iter() {
 				ori_map.insert(i, o.to_vec());
 			}
@@ -269,7 +274,7 @@ impl SubShardDecoder {
 				processed_segments.insert(segment);
 			}
 		}
-		Ok(result)
+		Ok((result, nb_decode))
 	}
 }
 
@@ -366,7 +371,8 @@ mod tests {
 						.enumerate()
 						.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
 				);
-			let s = decoder.reconstruct(&mut it).unwrap();
+			let (s, i) = decoder.reconstruct(&mut it).unwrap();
+			assert_eq!(i, 1);
 			assert_eq!((i_seg as u8, segments[i_seg].clone()), s[0]);
 		}
 		// try batching 2 subchunk
@@ -409,7 +415,8 @@ mod tests {
 					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
 			);
 
-		let s = decoder.reconstruct(&mut it1.chain(it2)).unwrap();
+		let (s, i) = decoder.reconstruct(&mut it1.chain(it2)).unwrap();
+		assert_eq!(i, 1); // all chunk ix are aligned so can be processed at once.
 		assert_eq!((i_seg1 as u8, segments[i_seg1].clone()), s[0]);
 		assert_eq!((i_seg2 as u8, segments[i_seg2].clone()), s[1]);
 	}
