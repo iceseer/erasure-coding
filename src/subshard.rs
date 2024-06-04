@@ -158,8 +158,8 @@ impl SubShardDecoder {
 		let mut shards: [MaybeUninit<[u8; BATCH_SHARD_SIZE]>; N_SHARDS] =
 			unsafe { MaybeUninit::uninit().assume_init() };
 
-		for i in 0..N_SHARDS {
-			shards[i].write([0u8; BATCH_SHARD_SIZE]);
+		for shard in shards.iter_mut() {
+			shard.write([0u8; BATCH_SHARD_SIZE]);
 		}
 
 		Ok(Self {
@@ -211,10 +211,10 @@ impl SubShardDecoder {
 				let mut added = false;
 				{
 					let shard = if chunk_ix < N_SHARDS {
-						let s = &self.shards_ori[chunk_ix] as *const [u8; BATCH_SHARD_SIZE]
-							as *mut [u8; BATCH_SHARD_SIZE];
+						let s =
+							&self.shards_ori[chunk_ix] as *const _ as *mut [u8; BATCH_SHARD_SIZE];
 						// each shard are only accessed a single time here.
-						unsafe { std::mem::transmute(s) }
+						unsafe { s.as_mut().expect("non null") }
 					} else {
 						&mut shard_buff
 					};
@@ -257,10 +257,10 @@ impl SubShardDecoder {
 					continue;
 				}
 				if chunk_ix < N_SHARDS {
-					self.decoder.add_original_shard(chunk_ix, &self.shards_ori[chunk_ix])?;
+					self.decoder.add_original_shard(chunk_ix, self.shards_ori[chunk_ix])?;
 					ori_map.insert(chunk_ix, &self.shards_ori[chunk_ix][..]);
 				} else {
-					self.decoder.add_recovery_shard(chunk_ix - N_SHARDS, &shard_buff)?;
+					self.decoder.add_recovery_shard(chunk_ix - N_SHARDS, shard_buff)?;
 				}
 				nb_chunk += 1;
 				if nb_chunk == N_SHARDS {
