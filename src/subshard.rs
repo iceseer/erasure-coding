@@ -278,6 +278,8 @@ impl SubShardDecoder {
 			}
 			let ori_ret = self.decoder.decode()?;
 			nb_decode += 1;
+			// TODO modify deps to also access original data and avoid self.ori_shards buffer.
+			// Also to avoid instantiating ori_map container.
 			for (i, o) in ori_ret.restored_original_iter() {
 				ori_map.insert(i, o);
 			}
