@@ -351,18 +351,18 @@ mod tests {
 		let chunks = encoder.construct_chunks(&segments).unwrap();
 
 		for i_seg in 0..nb_seg {
-			let mut it = (&chunks[i_seg][0..N_SHARDS / 3])
+			let mut it = (chunks[i_seg][0..N_SHARDS / 3])
 				.iter()
 				.enumerate()
 				.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16), c))
 				.chain(
-					(&chunks[i_seg][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+					(chunks[i_seg][N_SHARDS..N_SHARDS + N_SHARDS / 3])
 						.iter()
 						.enumerate()
 						.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
 				)
 				.chain(
-					(&chunks[i_seg][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+					(chunks[i_seg][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
 						.iter()
 						.enumerate()
 						.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
@@ -378,34 +378,34 @@ mod tests {
 		let i_seg1 = 0;
 		let i_seg2 = nb_seg / 2;
 
-		let it1 = (&chunks[i_seg1][0..N_SHARDS / 3])
+		let it1 = (chunks[i_seg1][0..N_SHARDS / 3])
 			.iter()
 			.enumerate()
 			.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16), c))
 			.chain(
-				(&chunks[i_seg1][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+				(chunks[i_seg1][N_SHARDS..N_SHARDS + N_SHARDS / 3])
 					.iter()
 					.enumerate()
 					.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
 			)
 			.chain(
-				(&chunks[i_seg1][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+				(chunks[i_seg1][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
 					.iter()
 					.enumerate()
 					.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
 			);
-		let it2 = (&chunks[i_seg2][0..N_SHARDS / 3])
+		let it2 = (chunks[i_seg2][0..N_SHARDS / 3])
 			.iter()
 			.enumerate()
 			.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16), c))
 			.chain(
-				(&chunks[i_seg2][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+				(chunks[i_seg2][N_SHARDS..N_SHARDS + N_SHARDS / 3])
 					.iter()
 					.enumerate()
 					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
 			)
 			.chain(
-				(&chunks[i_seg2][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+				(chunks[i_seg2][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
 					.iter()
 					.enumerate()
 					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
@@ -416,36 +416,36 @@ mod tests {
 		assert_eq!((i_seg1 as u8, segments[i_seg1].clone()), s[0]);
 		assert_eq!((i_seg2 as u8, segments[i_seg2].clone()), s[1]);
 
-		let it1 = (&chunks[i_seg1][0..N_SHARDS / 3])
+		let it1 = (chunks[i_seg1][0..N_SHARDS / 3])
 			.iter()
 			.enumerate()
 			.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16), c))
 			.chain(
-				(&chunks[i_seg1][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+				(chunks[i_seg1][N_SHARDS..N_SHARDS + N_SHARDS / 3])
 					.iter()
 					.enumerate()
 					.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
 			)
 			.chain(
-				(&chunks[i_seg1][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+				(chunks[i_seg1][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
 					.iter()
 					.enumerate()
 					.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
 			);
 
 		// unaligned a batch of chunks
-		let it3 = (&chunks[i_seg2][0 + 1..N_SHARDS / 3 + 1])
+		let it3 = (chunks[i_seg2][1..N_SHARDS / 3 + 1])
 			.iter()
 			.enumerate()
 			.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + 1), c))
 			.chain(
-				(&chunks[i_seg2][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+				(chunks[i_seg2][N_SHARDS..N_SHARDS + N_SHARDS / 3])
 					.iter()
 					.enumerate()
 					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
 			)
 			.chain(
-				(&chunks[i_seg2][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+				(chunks[i_seg2][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
 					.iter()
 					.enumerate()
 					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
