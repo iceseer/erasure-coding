@@ -51,11 +51,10 @@ const SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL: usize =
 													 //
 const BATCH_SHARD_SIZE: usize = SUBSHARD_BATCH_MUL * SHARD_MIN_SIZE; // 192
 
-
 const SUBSHARD_BATCH_MUL1: usize = SHARD_MIN_SIZE / SUBSHARD_SIZE; // 64 / 12, only 5
 const BATCH_SHARD_SIZE_1: usize = SHARD_MIN_SIZE; // 192
 const SUBSHARD_BATCH_MUL2: usize = (SHARD_MIN_SIZE * 2) / SUBSHARD_SIZE; // 128 / 12, only 10
-const BATCH_SHARD_SIZE_2: usize = 2*SHARD_MIN_SIZE; // 192
+const BATCH_SHARD_SIZE_2: usize = 2 * SHARD_MIN_SIZE; // 192
 
 /// Fix size segment of a larger data.
 /// Data is padded when unaligned with
@@ -74,11 +73,13 @@ pub type SubShard = [u8; SUBSHARD_SIZE];
 /// Subshard uses some temp memory, so these should be used multiple time instead of allocating.
 pub struct SubShardEncoder {
 	encoder: reed_solomon::ReedSolomonEncoder,
+	last_shard_size: usize,
 }
 
 impl SubShardEncoder {
 	pub fn new() -> Result<Self, Error> {
 		Ok(Self {
+			last_shard_size: BATCH_SHARD_SIZE,
 			encoder: reed_solomon::ReedSolomonEncoder::new(
 				N_SHARDS,
 				N_REDUNDANCY * N_SHARDS,
@@ -88,68 +89,76 @@ impl SubShardEncoder {
 	}
 
 	/// Construct erasure-coded chunks.
-	/// Segement input must be ordered by index and consecutive.
-	/// Data must be less than MAX_SUB_OPTIMAL_SIZE_DATA.
+	/// Resulting in groups of subshard per input segments.
 	pub fn construct_chunks(
 		&mut self,
 		segments: &[Segment],
 	) -> Result<Vec<Box<[SubShard; TOTAL_SHARDS]>>, Error> {
-		if segments.len() > SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL {
-			return Err(Error::BadPayload);
-		}
-		for (n, s) in segments.iter().enumerate() {
-			if s.index as usize != n {
-				return Err(Error::BadPayload);
-			}
-		}
-		let mut result = vec![
-			Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]);
-			segments.len()
-		];
+		let mut result = vec![Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]); segments.len()];
 
+		let mut seg_offset = 0;
 		let mut shard = [0u8; BATCH_SHARD_SIZE];
-		for shard_a in 0..N_SHARDS {
-			let mut shard_i = 0;
-			for segment_i in 0..segments.len() {
-				for point_i in 0..SUBSHARD_POINTS {
-					let data_i = (point_i * N_SHARDS) * 2 + shard_a * 2;
-					let point = if data_i < SEGMENT_SIZE {
-						(segments[segment_i].data[data_i], segments[segment_i].data[data_i + 1])
-					} else {
-						(0, 0)
-					};
-					shard[shard_i] = point.0;
-					shard[shard_i + POINT_BYTE_SPACING] = point.1;
-					result[segment_i][shard_a][point_i * 2] = point.0;
-					result[segment_i][shard_a][point_i * 2 + 1] = point.1;
-					shard_i += 1;
-					if shard_i % POINT_BYTE_SPACING == 0 {
-						shard_i += POINT_BYTE_SPACING;
-					}
-				}
+		for segments in segments.chunks(SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL) {
+			let s = if segments.len() <= SUBSHARD_BATCH_MUL1 {
+				// 1 *
+				BATCH_SHARD_SIZE_1
+			} else if segments.len() <= SUBSHARD_BATCH_MUL2 {
+				// 2 *
+				BATCH_SHARD_SIZE_2
+			} else {
+				// 3 *
+				BATCH_SHARD_SIZE
+			};
+			if self.last_shard_size != s {
+				self.encoder.reset(N_SHARDS, N_REDUNDANCY * N_SHARDS, s)?;
+				self.last_shard_size = s;
 			}
-			self.encoder.add_original_shard(shard)?;
-		}
 
-		let enco_res = self.encoder.encode()?;
-		for (shard_a, data) in enco_res.recovery_iter().enumerate() {
-			let mut segment_i = 0;
-			let mut data_i = 0;
-			while data_i != data.len() {
-				for point_i in 0..SUBSHARD_POINTS {
-					let point = (data[data_i], data[data_i + 32]);
-					data_i += 1;
-					if data_i % POINT_BYTE_SPACING == 0 {
-						data_i += POINT_BYTE_SPACING;
+			for shard_a in 0..N_SHARDS {
+				let mut shard_i = 0;
+				for segment_i in 0..segments.len() {
+					for point_i in 0..SUBSHARD_POINTS {
+						let data_i = (point_i * N_SHARDS) * 2 + shard_a * 2;
+						let point = if data_i < SEGMENT_SIZE {
+							(segments[segment_i].data[data_i], segments[segment_i].data[data_i + 1])
+						} else {
+							(0, 0)
+						};
+						shard[shard_i] = point.0;
+						shard[shard_i + POINT_BYTE_SPACING] = point.1;
+						result[seg_offset + segment_i][shard_a][point_i * 2] = point.0;
+						result[seg_offset + segment_i][shard_a][point_i * 2 + 1] = point.1;
+						shard_i += 1;
+						if shard_i % POINT_BYTE_SPACING == 0 {
+							shard_i += POINT_BYTE_SPACING;
+						}
 					}
-					result[segment_i][shard_a + N_SHARDS][point_i * 2] = point.0;
-					result[segment_i][shard_a + N_SHARDS][point_i * 2 + 1] = point.1;
 				}
-				segment_i += 1;
-				if segment_i == segments.len() {
-					break;
+				self.encoder.add_original_shard(&shard[..s])?;
+			}
+
+			let enco_res = self.encoder.encode()?;
+			for (shard_a, data) in enco_res.recovery_iter().enumerate() {
+				let mut segment_i = 0;
+				let mut data_i = 0;
+				while data_i != data.len() {
+					for point_i in 0..SUBSHARD_POINTS {
+						let point = (data[data_i], data[data_i + 32]);
+						data_i += 1;
+						if data_i % POINT_BYTE_SPACING == 0 {
+							data_i += POINT_BYTE_SPACING;
+						}
+						result[seg_offset + segment_i][shard_a + N_SHARDS][point_i * 2] = point.0;
+						result[seg_offset + segment_i][shard_a + N_SHARDS][point_i * 2 + 1] =
+							point.1;
+					}
+					segment_i += 1;
+					if segment_i == segments.len() {
+						break;
+					}
 				}
 			}
+			seg_offset += SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL;
 		}
 		Ok(result)
 	}
@@ -160,6 +169,7 @@ pub struct SubShardDecoder {
 	decoder: reed_solomon::ReedSolomonDecoder,
 	// cannot access ori shards from decoder, copying them here.
 	shards_ori: [[u8; BATCH_SHARD_SIZE]; N_SHARDS],
+	last_shard_size: usize,
 }
 
 impl SubShardDecoder {
@@ -172,6 +182,7 @@ impl SubShardDecoder {
 		}
 
 		Ok(Self {
+			last_shard_size: BATCH_SHARD_SIZE,
 			decoder: reed_solomon::ReedSolomonDecoder::new(
 				N_SHARDS,
 				N_REDUNDANCY * N_SHARDS,
@@ -278,14 +289,16 @@ impl SubShardDecoder {
 				// 1 *
 				BATCH_SHARD_SIZE_1
 			} else if segments.len() <= SUBSHARD_BATCH_MUL2 {
-				// 2 * 
+				// 2 *
 				BATCH_SHARD_SIZE_2
 			} else {
-				// 3 * 
+				// 3 *
 				BATCH_SHARD_SIZE
 			};
-			// TODO only reset if s different from prev
-			self.decoder.reset(N_SHARDS, N_REDUNDANCY * N_SHARDS, s)?;
+			if s != self.last_shard_size {
+				self.decoder.reset(N_SHARDS, N_REDUNDANCY * N_SHARDS, s)?;
+				self.last_shard_size = s;
+			}
 			let mut nb_chunk = 0;
 			let mut ori_map: std::collections::BTreeMap<usize, &[u8]> = Default::default();
 			for (chunk_ix, chunks) in ori.iter().enumerate() {
@@ -319,7 +332,8 @@ impl SubShardDecoder {
 				debug_assert!(nb == 0 || nb == segments.len());
 				if nb > 0 {
 					if chunk_ix < N_SHARDS {
-						self.decoder.add_original_shard(chunk_ix, &self.shards_ori[chunk_ix][..s])?;
+						self.decoder
+							.add_original_shard(chunk_ix, &self.shards_ori[chunk_ix][..s])?;
 						ori_map.insert(chunk_ix, &self.shards_ori[chunk_ix][..]);
 					} else {
 						self.decoder.add_recovery_shard(chunk_ix - N_SHARDS, &shard_buff[..s])?;
@@ -339,7 +353,7 @@ impl SubShardDecoder {
 				ori_map.insert(i, o);
 			}
 			debug_assert_eq!(ori_map.len(), N_SHARDS);
-			for (i, segment) in segments.iter().enumerate()  {
+			for (i, segment) in segments.iter().enumerate() {
 				let chunk_start = i * SEGMENT_SIZE_ALIGNED;
 				let original = ori_chunk_to_data(&ori_map, chunk_start, Some(SEGMENT_SIZE))
 					.expect("number of segments checked");
@@ -348,7 +362,6 @@ impl SubShardDecoder {
 					Segment { data: Box::new(original), index: *segment as u32 },
 				));
 			}
-
 		}
 
 		Ok((result2, nb_decode))
