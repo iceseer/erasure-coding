@@ -51,6 +51,12 @@ const SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL: usize =
 													 //
 const BATCH_SHARD_SIZE: usize = SUBSHARD_BATCH_MUL * SHARD_MIN_SIZE; // 192
 
+
+const SUBSHARD_BATCH_MUL1: usize = SHARD_MIN_SIZE / SUBSHARD_SIZE; // 64 / 12, only 5
+const BATCH_SHARD_SIZE_1: usize = SHARD_MIN_SIZE; // 192
+const SUBSHARD_BATCH_MUL2: usize = (SHARD_MIN_SIZE * 2) / SUBSHARD_SIZE; // 128 / 12, only 10
+const BATCH_SHARD_SIZE_2: usize = 2*SHARD_MIN_SIZE; // 192
+
 /// Fix size segment of a larger data.
 /// Data is padded when unaligned with
 /// the segment size.
@@ -267,6 +273,18 @@ impl SubShardDecoder {
 		// Note that sometime byte could stay set to non zero value, but it does not matter.
 		let mut shard_buff = [0u8; BATCH_SHARD_SIZE];
 		for segments in segment_batches {
+			let s = if segments.len() <= SUBSHARD_BATCH_MUL1 {
+				// 1 *
+				BATCH_SHARD_SIZE_1
+			} else if segments.len() <= SUBSHARD_BATCH_MUL2 {
+				// 2 * 
+				BATCH_SHARD_SIZE_2
+			} else {
+				// 3 * 
+				BATCH_SHARD_SIZE
+			};
+			// TODO only reset if s different from prev
+			self.decoder.reset(N_SHARDS, N_REDUNDANCY * N_SHARDS, s)?;
 			let mut nb_chunk = 0;
 			let mut ori_map: std::collections::BTreeMap<usize, &[u8]> = Default::default();
 			for (chunk_ix, chunks) in ori.iter().enumerate() {
@@ -300,10 +318,10 @@ impl SubShardDecoder {
 				debug_assert!(nb == 0 || nb == segments.len());
 				if nb > 0 {
 					if chunk_ix < N_SHARDS {
-						self.decoder.add_original_shard(chunk_ix, self.shards_ori[chunk_ix])?;
+						self.decoder.add_original_shard(chunk_ix, &self.shards_ori[chunk_ix][..s])?;
 						ori_map.insert(chunk_ix, &self.shards_ori[chunk_ix][..]);
 					} else {
-						self.decoder.add_recovery_shard(chunk_ix - N_SHARDS, shard_buff)?;
+						self.decoder.add_recovery_shard(chunk_ix - N_SHARDS, &shard_buff[..s])?;
 					}
 					nb_chunk += 1;
 					if nb_chunk == N_SHARDS {
@@ -333,6 +351,7 @@ impl SubShardDecoder {
 
 		let mut result = Vec::new();
 
+		self.decoder.reset(N_SHARDS, N_REDUNDANCY * N_SHARDS, BATCH_SHARD_SIZE)?;
 		// Note that sometime byte could stay set to non zero value, but it does not matter.
 		let mut shard_buff = [0u8; BATCH_SHARD_SIZE];
 
