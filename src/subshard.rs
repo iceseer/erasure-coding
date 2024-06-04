@@ -349,26 +349,68 @@ mod tests {
 		let mut decoder = SubShardDecoder::new().unwrap();
 		let chunks = encoder.construct_chunks(&segments).unwrap();
 
-		// TODO test for all i_seg and combination of up to 16 i_seg
-		let i_seg = nb_seg / 2;
+		for i_seg in 0..nb_seg {
+			let mut it = (&chunks[i_seg][0..N_SHARDS / 3])
+				.iter()
+				.enumerate()
+				.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16), c))
+				.chain(
+					(&chunks[i_seg][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+						.iter()
+						.enumerate()
+						.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
+				)
+				.chain(
+					(&chunks[i_seg][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+						.iter()
+						.enumerate()
+						.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
+				);
+			let s = decoder.reconstruct(&mut it).unwrap();
+			assert_eq!((i_seg as u8, segments[i_seg].clone()), s[0]);
+		}
+		// try batching 2 subchunk
+		if nb_seg < 2 {
+			return;
+		}
+		let i_seg1 = 0;
+		let i_seg2 = nb_seg / 2;
 
-		let mut it = (&chunks[i_seg][0..N_SHARDS / 3])
+		let it1 = (&chunks[i_seg1][0..N_SHARDS / 3])
 			.iter()
 			.enumerate()
-			.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16), c))
+			.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16), c))
 			.chain(
-				(&chunks[i_seg][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+				(&chunks[i_seg1][N_SHARDS..N_SHARDS + N_SHARDS / 3])
 					.iter()
 					.enumerate()
-					.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
+					.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
 			)
 			.chain(
-				(&chunks[i_seg][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+				(&chunks[i_seg1][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
 					.iter()
 					.enumerate()
-					.map(|(i, c)| (i_seg as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
+					.map(|(i, c)| (i_seg1 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
 			);
-		let s = decoder.reconstruct(&mut it).unwrap();
-		assert_eq!((i_seg as u8, segments[i_seg].clone()), s[0]);
+		let it2 = (&chunks[i_seg2][0..N_SHARDS / 3])
+			.iter()
+			.enumerate()
+			.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16), c))
+			.chain(
+				(&chunks[i_seg2][N_SHARDS..N_SHARDS + N_SHARDS / 3])
+					.iter()
+					.enumerate()
+					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16), c)),
+			)
+			.chain(
+				(&chunks[i_seg2][N_SHARDS * 2..N_SHARDS * 2 + N_SHARDS / 3])
+					.iter()
+					.enumerate()
+					.map(|(i, c)| (i_seg2 as u8, ChunkIndex(i as u16 + N_SHARDS as u16 * 2), c)),
+			);
+
+		let s = decoder.reconstruct(&mut it1.chain(it2)).unwrap();
+		assert_eq!((i_seg1 as u8, segments[i_seg1].clone()), s[0]);
+		assert_eq!((i_seg2 as u8, segments[i_seg2].clone()), s[1]);
 	}
 }
