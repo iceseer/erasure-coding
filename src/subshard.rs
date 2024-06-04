@@ -86,12 +86,10 @@ impl SubShardEncoder {
 		if data.len() > SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL {
 			return Err(Error::BadPayload);
 		}
-		let mut next = 0;
-		for s in data.iter() {
-			if s.index != next {
+		for (n, s) in data.iter().enumerate() {
+			if s.index as usize != n {
 				return Err(Error::BadPayload);
 			}
-			next += 1;
 		}
 		let mut result = vec![
 			Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]);
@@ -119,7 +117,7 @@ impl SubShardEncoder {
 					}
 				}
 			}
-			self.encoder.add_original_shard(&shard)?;
+			self.encoder.add_original_shard(shard)?;
 		}
 
 		let enco_res = self.encoder.encode()?;
@@ -139,7 +137,7 @@ impl SubShardEncoder {
 				segment_i += 1;
 			}
 		}
-		return Ok(result);
+		Ok(result)
 	}
 }
 
@@ -195,56 +193,56 @@ impl SubShardDecoder {
 
 			// Note this favor original chunks (firsts chunk_ix).
 			for (chunk_ix, chunks) in ori.iter().enumerate() {
-				if chunks.len() > 0 {
-					let mut added = false;
-					for (segment_i, chunk) in chunks {
-						let segment_i = *segment_i as usize;
-						if nb_chunk == 0 {
-							if !processed_segments.contains(&segment_i) {
-								run_segments.insert(segment_i, 1);
-							} else {
-								continue;
-							}
+				if chunks.is_empty() {
+					continue;
+				}
+				let mut added = false;
+				for (segment_i, chunk) in chunks {
+					let segment_i = *segment_i as usize;
+					if nb_chunk == 0 {
+						if !processed_segments.contains(&segment_i) {
+							run_segments.insert(segment_i, 1);
 						} else {
-							if let Some(count) = run_segments.get_mut(&segment_i) {
-								if *count == nb_chunk {
-									*count += 1;
-								} else {
-									continue;
-								}
-							} else {
-								continue;
-							}
+							continue;
 						}
-						added = true;
-						let shard_i_s = segment_i * SUBSHARD_SIZE / SHARD_MIN_SIZE;
-						let shard_i_r = segment_i * SUBSHARD_SIZE % SHARD_MIN_SIZE;
-						let mut shard_i = shard_i_s * SHARD_MIN_SIZE + shard_i_r / POINT_SIZE;
-						for point_i in 0..SUBSHARD_POINTS {
-							shard[shard_i] = chunk[point_i * POINT_SIZE];
-							shard[shard_i + POINT_BYTE_SPACING] = chunk[(point_i * POINT_SIZE) + 1];
-							shard_i += 1;
-							if shard_i % POINT_BYTE_SPACING == 0 {
-								shard_i += POINT_BYTE_SPACING;
-							}
+					} else if let Some(count) = run_segments.get_mut(&segment_i) {
+						if *count == nb_chunk {
+							*count += 1;
+						} else {
+							continue;
 						}
-					}
-					if !added {
+					} else {
 						continue;
 					}
-					if chunk_ix < N_SHARDS {
-						self.decoder.add_original_shard(chunk_ix, &shard)?;
-						ori_map.insert(chunk_ix, shard.to_vec());
-					} else {
-						self.decoder.add_recovery_shard(chunk_ix - N_SHARDS, &shard)?;
+
+					added = true;
+					let shard_i_s = segment_i * SUBSHARD_SIZE / SHARD_MIN_SIZE;
+					let shard_i_r = segment_i * SUBSHARD_SIZE % SHARD_MIN_SIZE;
+					let mut shard_i = shard_i_s * SHARD_MIN_SIZE + shard_i_r / POINT_SIZE;
+					for point_i in 0..SUBSHARD_POINTS {
+						shard[shard_i] = chunk[point_i * POINT_SIZE];
+						shard[shard_i + POINT_BYTE_SPACING] = chunk[(point_i * POINT_SIZE) + 1];
+						shard_i += 1;
+						if shard_i % POINT_BYTE_SPACING == 0 {
+							shard_i += POINT_BYTE_SPACING;
+						}
 					}
-					nb_chunk += 1;
-					if nb_chunk == N_SHARDS {
-						// we stop at first match, we cannot
-						// attempt more as then we would not have matched completed
-						// shards.
-						break;
-					}
+				}
+				if !added {
+					continue;
+				}
+				if chunk_ix < N_SHARDS {
+					self.decoder.add_original_shard(chunk_ix, shard)?;
+					ori_map.insert(chunk_ix, shard.to_vec());
+				} else {
+					self.decoder.add_recovery_shard(chunk_ix - N_SHARDS, shard)?;
+				}
+				nb_chunk += 1;
+				if nb_chunk == N_SHARDS {
+					// we stop at first match, we cannot
+					// attempt more as then we would not have matched completed
+					// shards.
+					break;
 				}
 			}
 			if nb_chunk != N_SHARDS {
@@ -289,9 +287,7 @@ fn ori_chunk_to_data(
 	let (mut full_i, mut shard_i, mut shard_a) = data_index_to_chunk_index(start_data);
 	let mut shard_i_offset = full_i * SHARD_MIN_SIZE;
 	loop {
-		let Some(s) = shards.get(&shard_a) else {
-			return None;
-		};
+		let s = shards.get(&shard_a)?;
 		let l = s[shard_i_offset + shard_i];
 		data[i_data] = l;
 		i_data += 1;
