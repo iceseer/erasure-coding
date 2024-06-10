@@ -87,9 +87,10 @@ pub fn reconstruct_from_systematic<'a>(
 	let mut shard_len = 0;
 	let mut nb = 0;
 	while let Some(chunk) = systematic_chunks.next() {
+		nb += 1;
 		if shard_len == 0 {
 			shard_len = chunk.len();
-			if shard_len % SHARD_ALIGNMENT != 0 {
+			if shard_len % SHARD_ALIGNMENT != 0 && nb != k {
 				return Err(Error::UnalignedChunk);
 			}
 
@@ -104,7 +105,6 @@ pub fn reconstruct_from_systematic<'a>(
 		}
 
 		bytes.extend_from_slice(&chunk);
-		nb += 1;
 		if nb == k {
 			break;
 		}
