@@ -48,7 +48,7 @@ const SUBSHARD_BATCH_MUL: usize = 3; // 3 * 12 is aligned with 64
 /// Number of segments in a aligned batch.
 const SEGMENTS_PER_SUBSHARD_BATCH_OPTIMAL: usize =
 	SUBSHARD_BATCH_MUL * SHARD_MIN_SIZE / SUBSHARD_SIZE; // 16
-													 //
+
 const BATCH_SHARD_SIZE: usize = SUBSHARD_BATCH_MUL * SHARD_MIN_SIZE; // 192
 
 const SUBSHARD_BATCH_MUL1: usize = SHARD_MIN_SIZE / SUBSHARD_SIZE; // 64 / 12, only 5
