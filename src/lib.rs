@@ -86,7 +86,7 @@ pub fn reconstruct_from_systematic<'a>(
 	let mut bytes: Vec<u8> = Vec::with_capacity(0);
 	let mut shard_len = 0;
 	let mut nb = 0;
-	while let Some(chunk) = systematic_chunks.next() {
+	for chunk in systematic_chunks.by_ref() {
 		nb += 1;
 		if shard_len == 0 {
 			shard_len = chunk.len();
@@ -104,7 +104,7 @@ pub fn reconstruct_from_systematic<'a>(
 			return Err(Error::NonUniformChunks)
 		}
 
-		bytes.extend_from_slice(&chunk);
+		bytes.extend_from_slice(chunk);
 		if nb == k {
 			break;
 		}
