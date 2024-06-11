@@ -10,7 +10,7 @@ use std::{
 };
 
 /// Fix segment size.
-const SEGMENT_SIZE: usize = 4096;
+pub const SEGMENT_SIZE: usize = 4096;
 
 const SUBSHARD_PER_SEGMENT: usize = ((SEGMENT_SIZE - 1) / SUBSHARD_SIZE) + 1;
 
@@ -19,13 +19,13 @@ const SUBSHARD_PER_SEGMENT: usize = ((SEGMENT_SIZE - 1) / SUBSHARD_SIZE) + 1;
 const SEGMENT_SIZE_ALIGNED: usize = SUBSHARD_PER_SEGMENT * SUBSHARD_SIZE; // 4104 byte
 
 /// Fix number of shards and subshards.
-const N_SHARDS: usize = 342;
+pub const N_SHARDS: usize = 342;
 
 /// The number of time the erasure coded shards we want.
-const N_REDUNDANCY: usize = 2;
+pub const N_REDUNDANCY: usize = 2;
 
 /// The total number of shards, both original and ec one.
-const TOTAL_SHARDS: usize = (1 + N_REDUNDANCY) * N_SHARDS;
+pub const TOTAL_SHARDS: usize = (1 + N_REDUNDANCY) * N_SHARDS;
 
 /// The reed-solomon library requires each shards to be 64 bytes aligned.
 const SHARD_MIN_SIZE: usize = SHARD_ALIGNMENT;
@@ -40,7 +40,7 @@ const SUBSHARD_POINTS: usize = 6;
 const POINT_SIZE: usize = 2; // gf16
 
 /// Size of a subshard in bytes.
-const SUBSHARD_SIZE: usize = POINT_SIZE * SUBSHARD_POINTS; // 12bytes
+pub const SUBSHARD_SIZE: usize = POINT_SIZE * SUBSHARD_POINTS; // 12bytes
 
 /// Aligned number of full shard to process subshard.
 const SUBSHARD_BATCH_MUL: usize = 3; // 3 * 12 is aligned with 64
