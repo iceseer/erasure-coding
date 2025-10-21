@@ -6,6 +6,9 @@ use scale::{Decode, Encode};
 
 use blake2b_simd::{blake2b as hash_fn, Hash as InnerHash, State as InnerHasher};
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 // Binary Merkle Tree with 16-bit `ChunkIndex` has depth at most 17.
 // The proof has at most `depth - 1` length.
 const MAX_MERKLE_PROOF_DEPTH: u32 = 16;
@@ -98,7 +101,9 @@ impl Iterator for MerklizedChunks {
 		let d = self.tree.len() - 1;
 		let idx = self.current_index.0;
 		let mut index = idx as usize;
+		
 		let mut path = Vec::with_capacity(d);
+		
 		for i in 0..d {
 			let layer = &self.tree[i];
 			if index % 2 == 0 {
@@ -120,17 +125,43 @@ impl Iterator for MerklizedChunks {
 impl MerklizedChunks {
 	/// Compute `MerklizedChunks` from a list of erasure chunks.
 	pub fn compute(chunks: Vec<Vec<u8>>) -> Self {
-		let mut hashes: Vec<Hash> = chunks
-			.iter()
-			.map(|chunk| {
+		let chunks_len = chunks.len();
+		let target_size = chunks_len.next_power_of_two();
+		
+		// Parallel chunk hashing
+		#[cfg(feature = "parallel")]
+		let hashes: Vec<Hash> = {
+			let mut h = chunks
+				.par_iter()
+				.map(|chunk| Hash::from(hash_fn(chunk)))
+				.collect::<Vec<_>>();
+			h.resize(target_size, Hash::default());
+			h
+		};
+		
+		#[cfg(not(feature = "parallel"))]
+		let hashes = {
+			let mut h = Vec::with_capacity(target_size);
+			for chunk in chunks.iter() {
 				let hash = hash_fn(chunk);
-				Hash::from(hash)
-			})
-			.collect();
-		hashes.resize(chunks.len().next_power_of_two(), Hash::default());
+				h.push(Hash::from(hash));
+			}
+			h.resize(target_size, Hash::default());
+			h
+		};
 
 		let depth = hashes.len().ilog2() as usize + 1;
-		let mut tree = vec![Vec::new(); depth];
+		let mut tree = Vec::with_capacity(depth);
+		
+		for lvl in 0..depth {
+			let len = if lvl == 0 {
+				target_size
+			} else {
+				2usize.pow((depth - 1 - lvl) as u32)
+			};
+			tree.push(Vec::with_capacity(len));
+		}
+		
 		tree[0] = hashes;
 
 		// Build the tree bottom-up.
@@ -138,14 +169,25 @@ impl MerklizedChunks {
 			let len = 2usize.pow((depth - 1 - lvl) as u32);
 			tree[lvl].resize(len, Hash::default());
 
-			// NOTE: This can be parallelized.
-			(0..len).for_each(|i| {
+			// Parallel tree level construction
+			#[cfg(feature = "parallel")]
+			{
 				let prev = &tree[lvl - 1];
-
-				let hash = combine(prev[2 * i], prev[2 * i + 1]);
-
-				tree[lvl][i] = hash;
-			});
+				let hashes: Vec<Hash> = (0..len)
+					.into_par_iter()
+					.map(|i| combine(prev[2 * i], prev[2 * i + 1]))
+					.collect();
+				tree[lvl] = hashes;
+			}
+			
+			#[cfg(not(feature = "parallel"))]
+			{
+				(0..len).for_each(|i| {
+					let prev = &tree[lvl - 1];
+					let hash = combine(prev[2 * i], prev[2 * i + 1]);
+					tree[lvl][i] = hash;
+				});
+			}
 		});
 
 		assert!(tree[tree.len() - 1].len() == 1, "root must be a single hash");
@@ -159,6 +201,7 @@ impl MerklizedChunks {
 	}
 }
 
+#[inline(always)]
 fn combine(left: Hash, right: Hash) -> Hash {
 	let mut hasher = InnerHasher::new();
 
@@ -172,6 +215,7 @@ fn combine(left: Hash, right: Hash) -> Hash {
 
 impl ErasureChunk {
 	/// Verify the proof of the chunk against the erasure root and index.
+	#[inline]
 	pub fn verify(&self, root: &ErasureRoot) -> bool {
 		let leaf_hash = Hash::from(hash_fn(&self.chunk));
 		let bits = Bitfield(self.index.0);

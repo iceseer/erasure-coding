@@ -94,7 +94,11 @@ impl SubShardEncoder {
 		&mut self,
 		segments: &[Segment],
 	) -> Result<Vec<Box<[SubShard; TOTAL_SHARDS]>>, Error> {
-		let mut result = vec![Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]); segments.len()];
+		let mut result = Vec::with_capacity(segments.len());
+		
+		for _ in 0..segments.len() {
+			result.push(Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]));
+		}
 
 		let mut seg_offset = 0;
 		let mut shard = [0u8; BATCH_SHARD_SIZE];
@@ -200,11 +204,15 @@ impl SubShardDecoder {
 	where
 		I: Iterator<Item = (u8, ChunkIndex, &'a SubShard)>,
 	{
-		let mut ori = vec![Vec::new(); TOTAL_SHARDS];
+		let mut ori = Vec::with_capacity(TOTAL_SHARDS);
+		for _ in 0..TOTAL_SHARDS {
+			ori.push(Vec::new());
+		}
+		
 		let mut segments = BTreeMap::<u8, usize>::new();
 		let mut nb_decode = 0;
 
-		// TODO processed and run_segments could be skiped if we are sure to get
+		// TODO processed and run_segments could be skiped if we are sure to get
 		// correct number of chunks all for the same given chunk ix and segments.
 		for (segment, chunk_index, chunk) in subshards {
 			ori[chunk_index.0 as usize].push((segment, chunk));
@@ -257,7 +265,7 @@ impl SubShardDecoder {
 				}
 				continue;
 			}
-			// TODO max size 16, rather [;16] lookup?
+			// TODO max size 16, rather [;16] lookup?
 			let mut segment_batch = BTreeSet::new();
 			for (seg, count) in run_segments.into_iter() {
 				if count == N_SHARDS {
@@ -345,7 +353,7 @@ impl SubShardDecoder {
 			debug_assert!(nb_chunk == N_SHARDS);
 			let ori_ret = self.decoder.decode()?;
 			nb_decode += 1;
-			// TODO modify deps to also access original data and avoid self.ori_shards buffer.
+			// TODO modify deps to also access original data and avoid self.ori_shards buffer.
 			// Also to avoid instantiating ori_map container.
 			for (i, o) in ori_ret.restored_original_iter() {
 				ori_map.insert(i, o);
