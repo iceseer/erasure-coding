@@ -149,8 +149,7 @@ pub fn reconstruct_from_systematic<'a>(
 		}
 	}
 	
-	// Truncate to required size (without additional allocations)
-	bytes.truncate(data_len);
+	bytes.resize(data_len, 0);
 	Ok(bytes)
 }
 
