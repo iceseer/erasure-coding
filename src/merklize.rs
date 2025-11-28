@@ -130,25 +130,22 @@ impl MerklizedChunks {
 		
 		// Parallel chunk hashing
 		#[cfg(feature = "parallel")]
-		let hashes: Vec<Hash> = {
-			let mut h = chunks
-				.par_iter()
-				.map(|chunk| Hash::from(hash_fn(chunk)))
-				.collect::<Vec<_>>();
-			h.resize(target_size, Hash::default());
-			h
-		};
+		let mut hashes: Vec<Hash> = chunks
+			.par_iter()
+			.map(|chunk| Hash::from(hash_fn(chunk)))
+			.collect::<Vec<_>>();
 		
 		#[cfg(not(feature = "parallel"))]
-		let hashes = {
+		let mut hashes = {
 			let mut h = Vec::with_capacity(target_size);
 			for chunk in chunks.iter() {
 				let hash = hash_fn(chunk);
 				h.push(Hash::from(hash));
 			}
-			h.resize(target_size, Hash::default());
 			h
 		};
+		
+		hashes.resize(target_size, Hash::default());
 
 		let depth = hashes.len().ilog2() as usize + 1;
 		let mut tree = Vec::with_capacity(depth);
@@ -165,30 +162,33 @@ impl MerklizedChunks {
 		tree[0] = hashes;
 
 		// Build the tree bottom-up.
-		(1..depth).for_each(|lvl| {
+		for lvl in 1..depth {
 			let len = 2usize.pow((depth - 1 - lvl) as u32);
 			tree[lvl].resize(len, Hash::default());
+
+			let (prev_slice, out_slice) = tree.split_at_mut(lvl);
+			let prev = &*prev_slice.last().unwrap();
+			let out = &mut out_slice[0];
 
 			// Parallel tree level construction
 			#[cfg(feature = "parallel")]
 			{
-				let prev = &tree[lvl - 1];
-				let hashes: Vec<Hash> = (0..len)
-					.into_par_iter()
-					.map(|i| combine(prev[2 * i], prev[2 * i + 1]))
-					.collect();
-				tree[lvl] = hashes;
+				out.par_iter_mut()
+					.enumerate()
+					.for_each(|(i, out_val)| {
+						*out_val = combine(prev[2 * i], prev[2 * i + 1]);
+					});
 			}
 			
 			#[cfg(not(feature = "parallel"))]
 			{
-				(0..len).for_each(|i| {
-					let prev = &tree[lvl - 1];
-					let hash = combine(prev[2 * i], prev[2 * i + 1]);
-					tree[lvl][i] = hash;
-				});
+				out.iter_mut()
+					.enumerate()
+					.for_each(|(i, out_val)| {
+						*out_val = combine(prev[2 * i], prev[2 * i + 1]);
+					});
 			}
-		});
+		}
 
 		assert!(tree[tree.len() - 1].len() == 1, "root must be a single hash");
 

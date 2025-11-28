@@ -9,6 +9,19 @@ use std::{
 	mem::MaybeUninit,
 };
 
+/// Macro to create a vector without cloning the element.
+/// The element expression is evaluated on each iteration.
+macro_rules! vec_no_clone {
+	($elem:expr; $n:expr) => {{
+		let n = $n;
+		let mut result = Vec::with_capacity(n);
+		for _ in 0..n {
+			result.push($elem);
+		}
+		result
+	}};
+}
+
 /// Fix segment size.
 pub const SEGMENT_SIZE: usize = 4096;
 
@@ -94,11 +107,7 @@ impl SubShardEncoder {
 		&mut self,
 		segments: &[Segment],
 	) -> Result<Vec<Box<[SubShard; TOTAL_SHARDS]>>, Error> {
-		let mut result = Vec::with_capacity(segments.len());
-		
-		for _ in 0..segments.len() {
-			result.push(Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]));
-		}
+		let mut result = vec_no_clone![Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]); segments.len()];
 
 		let mut seg_offset = 0;
 		let mut shard = [0u8; BATCH_SHARD_SIZE];
