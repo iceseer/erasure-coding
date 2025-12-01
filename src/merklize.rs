@@ -9,6 +9,9 @@ use blake2b_simd::{blake2b as hash_fn, Hash as InnerHash, State as InnerHasher};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+#[cfg(feature = "parallel")]
+use crate::init_rayon_thread_pool;
+
 // Binary Merkle Tree with 16-bit `ChunkIndex` has depth at most 17.
 // The proof has at most `depth - 1` length.
 const MAX_MERKLE_PROOF_DEPTH: u32 = 16;
@@ -130,10 +133,15 @@ impl MerklizedChunks {
 		
 		// Parallel chunk hashing
 		#[cfg(feature = "parallel")]
-		let mut hashes: Vec<Hash> = chunks
-			.par_iter()
-			.map(|chunk| Hash::from(hash_fn(chunk)))
-			.collect::<Vec<_>>();
+		let mut hashes: Vec<Hash> = {
+			// Initialize the thread pool on first use
+			init_rayon_thread_pool();
+			
+			chunks
+				.par_iter()
+				.map(|chunk| Hash::from(hash_fn(chunk)))
+				.collect::<Vec<_>>()
+		};
 		
 		#[cfg(not(feature = "parallel"))]
 		let mut hashes = {
@@ -173,6 +181,9 @@ impl MerklizedChunks {
 			// Parallel tree level construction
 			#[cfg(feature = "parallel")]
 			{
+				// Initialize the thread pool on first use
+				init_rayon_thread_pool();
+				
 				out.par_iter_mut()
 					.enumerate()
 					.for_each(|(i, out_val)| {

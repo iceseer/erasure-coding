@@ -18,6 +18,9 @@ pub use subshard::*;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+#[cfg(feature = "parallel")]
+use std::sync::Once;
+
 #[cfg(feature = "arena")]
 use bumpalo::Bump;
 
@@ -52,6 +55,39 @@ pub const MAX_CHUNKS: u16 = 16384;
 
 // The reed-solomon library requires each shards to be 64 bytes aligned.
 const SHARD_ALIGNMENT: usize = 64;
+
+/// Initialize the thread pool for parallel computations.
+/// The number of threads can be configured via the `RAYON_NUM_THREADS` environment variable
+/// at compile time. If the variable is not set, the number of CPU cores is used.
+/// 
+/// Usage example:
+/// ```bash
+/// RAYON_NUM_THREADS=4 cargo build --features parallel
+/// ```
+#[cfg(feature = "parallel")]
+pub(crate) fn init_rayon_thread_pool() {
+	static INIT: Once = Once::new();
+	INIT.call_once(|| {
+		// Get the number of threads from the environment variable at compile time
+		// If the variable is not set, use the default value (0 = number of CPU cores)
+		if let Some(num_threads_str) = option_env!("RAYON_NUM_THREADS") {
+			if let Ok(num_threads) = num_threads_str.parse::<usize>() {
+				if num_threads > 0 {
+					// Set the environment variable at runtime,
+					// so rayon can use it during initialization
+					std::env::set_var("RAYON_NUM_THREADS", num_threads_str);
+					
+					// Try to initialize the global thread pool
+					// If it's already initialized, this is safely ignored
+					let _ = rayon::ThreadPoolBuilder::new()
+						.num_threads(num_threads)
+						.build_global();
+				}
+			}
+		}
+		// If the variable is not set or equals 0, rayon uses the default number of CPU cores
+	});
+}
 
 /// The index of an erasure chunk.
 #[derive(Eq, Ord, PartialEq, PartialOrd, Copy, Clone, Encode, Decode, Hash, Debug)]
@@ -297,6 +333,9 @@ fn make_original_shards(original_count: u16, data: &[u8]) -> Vec<Vec<u8>> {
 
 	#[cfg(feature = "parallel")]
 	{
+		// Initialize the thread pool on first use
+		init_rayon_thread_pool();
+		
 		// Parallel version: create shards in parallel
 		(0..original_count as usize)
 			.into_par_iter()
