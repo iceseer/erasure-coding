@@ -58,7 +58,8 @@ const SHARD_ALIGNMENT: usize = 64;
 
 /// Initialize the thread pool for parallel computations.
 /// The number of threads can be configured via the `RAYON_NUM_THREADS` environment variable
-/// at compile time. If the variable is not set, the number of CPU cores is used.
+/// at compile time. If the variable is not set, half of the logical CPU cores is used by default.
+/// If `RAYON_NUM_THREADS=0`, all logical CPU cores are used.
 ///
 /// Usage example:
 /// ```bash
@@ -68,22 +69,41 @@ const SHARD_ALIGNMENT: usize = 64;
 pub(crate) fn init_rayon_thread_pool() {
 	static INIT: Once = Once::new();
 	INIT.call_once(|| {
-		// Get the number of threads from the environment variable at compile time
-		// If the variable is not set, use the default value (0 = number of CPU cores)
-		if let Some(num_threads_str) = option_env!("RAYON_NUM_THREADS") {
-			if let Ok(num_threads) = num_threads_str.parse::<usize>() {
-				if num_threads > 0 {
-					// Set the environment variable at runtime,
-					// so rayon can use it during initialization
-					std::env::set_var("RAYON_NUM_THREADS", num_threads_str);
+		// Helper function to compute default (half of cores)
+		let default_threads = || {
+			let logical_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+			(logical_cores / 2).max(1)
+		};
 
-					// Try to initialize the global thread pool
-					// If it's already initialized, this is safely ignored
-					let _ = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global();
+		match option_env!("RAYON_NUM_THREADS") {
+			Some(num_threads_str) => {
+				// Variable is set, parse it
+				if let Ok(num_threads) = num_threads_str.parse::<usize>() {
+					if num_threads == 0 {
+						// RAYON_NUM_THREADS=0 means use all CPU cores (rayon default)
+						// Don't set num_threads, let rayon use default
+						let _ = rayon::ThreadPoolBuilder::new().build_global();
+					} else {
+						// RAYON_NUM_THREADS=N (N > 0) means use N threads
+						// Set the environment variable at runtime,
+						// so rayon can use it during initialization
+						std::env::set_var("RAYON_NUM_THREADS", num_threads_str);
+						let _ =
+							rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global();
+					}
+				} else {
+					// Invalid value, use default (half of cores)
+					let _ = rayon::ThreadPoolBuilder::new()
+						.num_threads(default_threads())
+						.build_global();
 				}
-			}
+			},
+			None => {
+				// Variable not set, use default (half of cores)
+				let _ =
+					rayon::ThreadPoolBuilder::new().num_threads(default_threads()).build_global();
+			},
 		}
-		// If the variable is not set or equals 0, rayon uses the default number of CPU cores
 	});
 }
 
