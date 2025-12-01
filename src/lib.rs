@@ -25,10 +25,10 @@ use std::sync::Once;
 use bumpalo::Bump;
 
 // Prefetch hints for cache locality optimization
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
 
 // Branch prediction hints
 #[cold]
@@ -59,7 +59,7 @@ const SHARD_ALIGNMENT: usize = 64;
 /// Initialize the thread pool for parallel computations.
 /// The number of threads can be configured via the `RAYON_NUM_THREADS` environment variable
 /// at compile time. If the variable is not set, the number of CPU cores is used.
-/// 
+///
 /// Usage example:
 /// ```bash
 /// RAYON_NUM_THREADS=4 cargo build --features parallel
@@ -76,12 +76,10 @@ pub(crate) fn init_rayon_thread_pool() {
 					// Set the environment variable at runtime,
 					// so rayon can use it during initialization
 					std::env::set_var("RAYON_NUM_THREADS", num_threads_str);
-					
+
 					// Try to initialize the global thread pool
 					// If it's already initialized, this is safely ignored
-					let _ = rayon::ThreadPoolBuilder::new()
-						.num_threads(num_threads)
-						.build_global();
+					let _ = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global();
 				}
 			}
 		}
@@ -158,7 +156,7 @@ pub fn reconstruct_from_systematic<'a>(
 	let mut bytes: Vec<u8> = Vec::with_capacity(0);
 	let mut shard_len = 0;
 	let mut nb = 0;
-	
+
 	for chunk in systematic_chunks.by_ref() {
 		nb += 1;
 		if unlikely(shard_len == 0) {
@@ -179,12 +177,12 @@ pub fn reconstruct_from_systematic<'a>(
 
 		// extend_from_slice uses optimized memcpy
 		bytes.extend_from_slice(chunk);
-		
+
 		if unlikely(nb == k) {
 			break;
 		}
 	}
-	
+
 	bytes.resize(data_len, 0);
 	Ok(bytes)
 }
@@ -200,12 +198,12 @@ pub fn construct_chunks(n_chunks: u16, data: &[u8]) -> Result<Vec<Vec<u8>>, Erro
 	if unlikely(n_chunks == 1) {
 		return Ok(vec![data.to_vec()]);
 	}
-	
+
 	#[cfg(feature = "arena")]
 	{
 		construct_chunks_arena(n_chunks, data)
 	}
-	
+
 	#[cfg(not(feature = "arena"))]
 	{
 		construct_chunks_default(n_chunks, data)
@@ -236,10 +234,10 @@ fn construct_chunks_arena(n_chunks: u16, data: &[u8]) -> Result<Vec<Vec<u8>>, Er
 	let original_count = systematic as usize;
 	let recovery_count = (n_chunks - systematic) as usize;
 	let shard_size = shard_bytes(systematic, data.len());
-	
+
 	// Arena for temporary allocations
 	let arena = Bump::with_capacity(original_count * shard_size + 4096);
-	
+
 	// Create shards using arena for intermediate data
 	let original_data = make_original_shards_arena(&arena, systematic, data, shard_size);
 	let original_iter = original_data.iter();
@@ -263,17 +261,17 @@ fn make_original_shards_arena(
 	// Optimization: use single large buffer instead of multiple Vecs
 	let total_size = original_count as usize * shard_size;
 	let mut flat_buffer = vec![0u8; total_size];
-	
+
 	// Copy data to flat buffer in one call
 	let data_to_copy = data.len().min(total_size);
 	flat_buffer[..data_to_copy].copy_from_slice(&data[..data_to_copy]);
-	
+
 	// Slice flat buffer into chunks without additional copying
 	let mut result = Vec::with_capacity(original_count as usize);
 	for chunk_data in flat_buffer.chunks_exact(shard_size) {
 		result.push(chunk_data.to_vec());
 	}
-	
+
 	result
 }
 
@@ -301,11 +299,11 @@ fn make_original_shards(original_count: u16, data: &[u8]) -> Vec<Vec<u8>> {
 		// Optimized sequential version with prefetch
 		let mut result = Vec::with_capacity(original_count as usize);
 		let mut remaining_data = data;
-		
+
 		for i in 0..original_count as usize {
 			let mut chunk = vec![0u8; shard_bytes];
 			let copy_len = remaining_data.len().min(shard_bytes);
-			
+
 			// Prefetch next data block
 			#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 			if i + 1 < original_count as usize && remaining_data.len() > shard_bytes {
@@ -316,16 +314,16 @@ fn make_original_shards(original_count: u16, data: &[u8]) -> Vec<Vec<u8>> {
 					}
 				}
 			}
-			
+
 			// Optimized copying (compiler uses memcpy/SIMD)
 			chunk[..copy_len].copy_from_slice(&remaining_data[..copy_len]);
-			
+
 			if likely(remaining_data.len() >= shard_bytes) {
 				remaining_data = &remaining_data[shard_bytes..];
 			} else {
 				remaining_data = &[];
 			}
-			
+
 			result.push(chunk);
 		}
 		result
@@ -335,7 +333,7 @@ fn make_original_shards(original_count: u16, data: &[u8]) -> Vec<Vec<u8>> {
 	{
 		// Initialize the thread pool on first use
 		init_rayon_thread_pool();
-		
+
 		// Parallel version: create shards in parallel
 		(0..original_count as usize)
 			.into_par_iter()
@@ -343,12 +341,12 @@ fn make_original_shards(original_count: u16, data: &[u8]) -> Vec<Vec<u8>> {
 				let mut chunk = vec![0u8; shard_bytes];
 				let start = i * shard_bytes;
 				let end = (start + shard_bytes).min(data.len());
-				
+
 				if likely(start < data.len()) {
 					let copy_len = end - start;
 					chunk[..copy_len].copy_from_slice(&data[start..end]);
 				}
-				
+
 				chunk
 			})
 			.collect()
@@ -511,83 +509,83 @@ mod tests {
 
 	#[test]
 	fn stress_test_various_sizes_with_random_chunk_loss() {
-		use rand::{Rng, SeedableRng};
-		use rand::seq::SliceRandom;
-		
+		use rand::{seq::SliceRandom, Rng, SeedableRng};
+
 		// Data sizes for testing
 		let data_sizes = vec![10, 1000, 10_000, 100_000, 1_000_000, 10_000_000, 50_000_000];
-		
+
 		// Various chunk configurations for testing
 		let chunk_configs = vec![16, 64, 256, 1024];
-		
+
 		for data_size in data_sizes.iter() {
 			println!("Testing data size: {} bytes", data_size);
-			
+
 			for &n_chunks in chunk_configs.iter() {
 				// Skip too large configurations for small data
 				if *data_size < 1000 && n_chunks > 64 {
 					continue;
 				}
-				
+
 				println!("  Testing with {} chunks", n_chunks);
-				
+
 				// Generate random data with fixed seed for reproducibility
-				let mut rng = rand::rngs::SmallRng::seed_from_u64((*data_size as u64) ^ (n_chunks as u64));
+				let mut rng =
+					rand::rngs::SmallRng::seed_from_u64((*data_size as u64) ^ (n_chunks as u64));
 				let original_data: Vec<u8> = (0..*data_size).map(|_| rng.gen()).collect();
-				
+
 				// Encode data
 				let chunks = construct_chunks(n_chunks, &original_data).unwrap();
 				assert_eq!(chunks.len(), n_chunks as usize);
-				
+
 				// Get minimum threshold for recovery
 				let threshold = recovery_threshold(n_chunks).unwrap() as usize;
-				
+
 				// Create indices of all chunks
 				let mut chunk_indices: Vec<usize> = (0..n_chunks as usize).collect();
-				
+
 				// Shuffle indices
 				chunk_indices.shuffle(&mut rng);
-				
+
 				// Take only threshold chunks (minimum required amount)
 				let selected_indices = &chunk_indices[..threshold];
-				
+
 				// Create map with selected chunks
 				let available_chunks: HashMap<ChunkIndex, Vec<u8>> = selected_indices
 					.iter()
 					.map(|&idx| (ChunkIndex(idx as u16), chunks[idx].clone()))
 					.collect();
-				
-				println!("    Using {} chunks out of {} (threshold: {})", 
-					available_chunks.len(), n_chunks, threshold);
-				
-				// Recover data from available chunks
-				let reconstructed = reconstruct(
+
+				println!(
+					"    Using {} chunks out of {} (threshold: {})",
+					available_chunks.len(),
 					n_chunks,
-					available_chunks.into_iter(),
-					original_data.len()
-				).unwrap();
-				
+					threshold
+				);
+
+				// Recover data from available chunks
+				let reconstructed =
+					reconstruct(n_chunks, available_chunks.into_iter(), original_data.len())
+						.unwrap();
+
 				// Verify that reconstructed data matches original
 				assert_eq!(
-					reconstructed.len(), 
+					reconstructed.len(),
 					original_data.len(),
 					"Reconstructed data length mismatch for size {} with {} chunks",
 					data_size,
 					n_chunks
 				);
-				
+
 				assert_eq!(
-					reconstructed, 
-					original_data,
+					reconstructed, original_data,
 					"Reconstructed data does not match original for size {} with {} chunks",
-					data_size,
-					n_chunks
+					data_size, n_chunks
 				);
 			}
-			
+
 			println!("  ✓ All chunk configurations passed for size {}", data_size);
 		}
-		
+
 		println!("✓ All stress tests passed!");
 	}
 }

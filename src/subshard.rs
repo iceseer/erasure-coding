@@ -107,7 +107,8 @@ impl SubShardEncoder {
 		&mut self,
 		segments: &[Segment],
 	) -> Result<Vec<Box<[SubShard; TOTAL_SHARDS]>>, Error> {
-		let mut result = vec_no_clone![Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]); segments.len()];
+		let mut result =
+			vec_no_clone![Box::new([[0u8; SUBSHARD_SIZE]; TOTAL_SHARDS]); segments.len()];
 
 		let mut seg_offset = 0;
 		let mut shard = [0u8; BATCH_SHARD_SIZE];
@@ -217,7 +218,7 @@ impl SubShardDecoder {
 		for _ in 0..TOTAL_SHARDS {
 			ori.push(Vec::new());
 		}
-		
+
 		let mut segments = BTreeMap::<u8, usize>::new();
 		let mut nb_decode = 0;
 

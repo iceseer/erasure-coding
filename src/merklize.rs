@@ -104,9 +104,9 @@ impl Iterator for MerklizedChunks {
 		let d = self.tree.len() - 1;
 		let idx = self.current_index.0;
 		let mut index = idx as usize;
-		
+
 		let mut path = Vec::with_capacity(d);
-		
+
 		for i in 0..d {
 			let layer = &self.tree[i];
 			if index % 2 == 0 {
@@ -130,19 +130,16 @@ impl MerklizedChunks {
 	pub fn compute(chunks: Vec<Vec<u8>>) -> Self {
 		let chunks_len = chunks.len();
 		let target_size = chunks_len.next_power_of_two();
-		
+
 		// Parallel chunk hashing
 		#[cfg(feature = "parallel")]
 		let mut hashes: Vec<Hash> = {
 			// Initialize the thread pool on first use
 			init_rayon_thread_pool();
-			
-			chunks
-				.par_iter()
-				.map(|chunk| Hash::from(hash_fn(chunk)))
-				.collect::<Vec<_>>()
+
+			chunks.par_iter().map(|chunk| Hash::from(hash_fn(chunk))).collect::<Vec<_>>()
 		};
-		
+
 		#[cfg(not(feature = "parallel"))]
 		let mut hashes = {
 			let mut h = Vec::with_capacity(target_size);
@@ -152,21 +149,17 @@ impl MerklizedChunks {
 			}
 			h
 		};
-		
+
 		hashes.resize(target_size, Hash::default());
 
 		let depth = hashes.len().ilog2() as usize + 1;
 		let mut tree = Vec::with_capacity(depth);
-		
+
 		for lvl in 0..depth {
-			let len = if lvl == 0 {
-				target_size
-			} else {
-				2usize.pow((depth - 1 - lvl) as u32)
-			};
+			let len = if lvl == 0 { target_size } else { 2usize.pow((depth - 1 - lvl) as u32) };
 			tree.push(Vec::with_capacity(len));
 		}
-		
+
 		tree[0] = hashes;
 
 		// Build the tree bottom-up.
@@ -183,21 +176,17 @@ impl MerklizedChunks {
 			{
 				// Initialize the thread pool on first use
 				init_rayon_thread_pool();
-				
-				out.par_iter_mut()
-					.enumerate()
-					.for_each(|(i, out_val)| {
-						*out_val = combine(prev[2 * i], prev[2 * i + 1]);
-					});
+
+				out.par_iter_mut().enumerate().for_each(|(i, out_val)| {
+					*out_val = combine(prev[2 * i], prev[2 * i + 1]);
+				});
 			}
-			
+
 			#[cfg(not(feature = "parallel"))]
 			{
-				out.iter_mut()
-					.enumerate()
-					.for_each(|(i, out_val)| {
-						*out_val = combine(prev[2 * i], prev[2 * i + 1]);
-					});
+				out.iter_mut().enumerate().for_each(|(i, out_val)| {
+					*out_val = combine(prev[2 * i], prev[2 * i + 1]);
+				});
 			}
 		}
 
