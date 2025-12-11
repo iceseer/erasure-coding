@@ -3,12 +3,12 @@ use erasure_coding::*;
 use std::time::Duration;
 
 fn chunks(n_chunks: u16, pov: &[u8]) -> Vec<Vec<u8>> {
-	construct_chunks(n_chunks, pov).unwrap()
+	construct_chunks(n_chunks, pov, None).unwrap()
 }
 
 fn erasure_root(n_chunks: u16, pov: &[u8]) -> ErasureRoot {
 	let chunks = chunks(n_chunks, pov);
-	MerklizedChunks::compute(chunks).root()
+	MerklizedChunks::compute(chunks, None).unwrap().root()
 }
 
 struct BenchParam {
@@ -109,7 +109,7 @@ fn bench_all(c: &mut Criterion) {
 			group.throughput(Throughput::Bytes(pov.len() as u64));
 			group.bench_with_input(BenchmarkId::from_parameter(param), &n_chunks, |b, _| {
 				b.iter(|| {
-					let iter = MerklizedChunks::compute(all_chunks.clone());
+					let iter = MerklizedChunks::compute(all_chunks.clone(), None).unwrap();
 					let n = iter.collect::<Vec<_>>().len();
 					assert_eq!(n, all_chunks.len());
 				});
@@ -124,7 +124,7 @@ fn bench_all(c: &mut Criterion) {
 			let param = BenchParam { pov_size, n_chunks };
 			let pov = vec![0xfe; pov_size];
 			let all_chunks = chunks(n_chunks, &pov);
-			let merkle = MerklizedChunks::compute(all_chunks);
+			let merkle = MerklizedChunks::compute(all_chunks, None).unwrap();
 			let root = merkle.root();
 			let chunks: Vec<_> = merkle.collect();
 			let chunk = chunks[n_chunks as usize / 2].clone();

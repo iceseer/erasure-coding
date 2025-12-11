@@ -10,7 +10,7 @@ use blake2b_simd::{blake2b as hash_fn, Hash as InnerHash, State as InnerHasher};
 use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
-use crate::init_rayon_thread_pool;
+use crate::get_thread_pool;
 
 // Binary Merkle Tree with 16-bit `ChunkIndex` has depth at most 17.
 // The proof has at most `depth - 1` length.
@@ -127,21 +127,33 @@ impl Iterator for MerklizedChunks {
 
 impl MerklizedChunks {
 	/// Compute `MerklizedChunks` from a list of erasure chunks.
-	pub fn compute(chunks: Vec<Vec<u8>>) -> Self {
+	///
+	/// # Arguments
+	/// * `chunks` - Vector of erasure-coded chunks
+	/// * `num_threads` - Optional number of threads for parallel computation (only with `parallel`
+	///   feature):
+	///   - `None` - use default (half of available CPU cores)
+	///   - `Some(0)` - use all available CPU cores
+	///   - `Some(n)` - use exactly n threads
+	pub fn compute(chunks: Vec<Vec<u8>>, num_threads: Option<usize>) -> Result<Self, Error> {
 		let chunks_len = chunks.len();
 		let target_size = chunks_len.next_power_of_two();
 
 		// Parallel chunk hashing
 		#[cfg(feature = "parallel")]
 		let mut hashes: Vec<Hash> = {
-			// Initialize the thread pool on first use
-			init_rayon_thread_pool();
+			// Use custom thread pool for parallel operations
+			let pool = get_thread_pool(num_threads)?;
 
-			chunks.par_iter().map(|chunk| Hash::from(hash_fn(chunk))).collect::<Vec<_>>()
+			pool.install(|| {
+				chunks.par_iter().map(|chunk| Hash::from(hash_fn(chunk))).collect::<Vec<_>>()
+			})
 		};
 
 		#[cfg(not(feature = "parallel"))]
 		let mut hashes = {
+			let _ = num_threads; // Unused in sequential mode
+
 			let mut h = Vec::with_capacity(target_size);
 			for chunk in chunks.iter() {
 				let hash = hash_fn(chunk);
@@ -174,11 +186,13 @@ impl MerklizedChunks {
 			// Parallel tree level construction
 			#[cfg(feature = "parallel")]
 			{
-				// Initialize the thread pool on first use
-				init_rayon_thread_pool();
+				// Use custom thread pool for parallel operations
+				let pool = get_thread_pool(num_threads)?;
 
-				out.par_iter_mut().enumerate().for_each(|(i, out_val)| {
-					*out_val = combine(prev[2 * i], prev[2 * i + 1]);
+				pool.install(|| {
+					out.par_iter_mut().enumerate().for_each(|(i, out_val)| {
+						*out_val = combine(prev[2 * i], prev[2 * i + 1]);
+					});
 				});
 			}
 
@@ -192,12 +206,12 @@ impl MerklizedChunks {
 
 		assert!(tree[tree.len() - 1].len() == 1, "root must be a single hash");
 
-		Self {
+		Ok(Self {
 			root: ErasureRoot::from(tree[tree.len() - 1][0]),
 			data: chunks.into(),
 			tree,
 			current_index: ChunkIndex::from(0),
-		}
+		})
 	}
 }
 
@@ -247,7 +261,7 @@ mod tests {
 	#[test]
 	fn zero_chunks_works() {
 		let chunks = vec![];
-		let iter = MerklizedChunks::compute(chunks.clone());
+		let iter = MerklizedChunks::compute(chunks.clone(), None).unwrap();
 		let root = iter.root();
 		let erasure_chunks: Vec<ErasureChunk> = iter.collect();
 		assert_eq!(erasure_chunks.len(), chunks.len());
@@ -257,7 +271,7 @@ mod tests {
 	#[test]
 	fn iter_works() {
 		let chunks = vec![vec![1], vec![2], vec![3]];
-		let iter = MerklizedChunks::compute(chunks.clone());
+		let iter = MerklizedChunks::compute(chunks.clone(), None).unwrap();
 		let root = iter.root();
 		let erasure_chunks: Vec<ErasureChunk> = iter.collect();
 		assert_eq!(erasure_chunks.len(), chunks.len());

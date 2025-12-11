@@ -23,16 +23,6 @@ arena = ["bumpalo"]
 panic = "abort"
 opt-level = 1
 
-[profile.release]
-lto = "thin"           # Thin LTO for balance between compilation speed and optimization
-codegen-units = 16     # Balance parallelism and optimization
-opt-level = 3          # Maximum optimizations
-
-[profile.bench]
-inherits = "release"
-lto = "fat"            # Aggressive LTO for benchmarks
-codegen-units = 1      # Best optimization
-
 [dev-dependencies]
 criterion = { version = "0.5.1", default-features = false, features = ["cargo_bench_support"] }
 quickcheck = { version = "1.0.3", default-features = false }

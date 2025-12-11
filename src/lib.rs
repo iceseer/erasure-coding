@@ -19,7 +19,7 @@ pub use subshard::*;
 use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
-use std::sync::Once;
+use std::sync::{Arc, RwLock};
 
 #[cfg(feature = "arena")]
 use bumpalo::Bump;
@@ -56,55 +56,73 @@ pub const MAX_CHUNKS: u16 = 16384;
 // The reed-solomon library requires each shards to be 64 bytes aligned.
 const SHARD_ALIGNMENT: usize = 64;
 
-/// Initialize the thread pool for parallel computations.
-/// The number of threads can be configured via the `RAYON_NUM_THREADS` environment variable
-/// at compile time. If the variable is not set, half of the logical CPU cores is used by default.
-/// If `RAYON_NUM_THREADS=0`, all logical CPU cores are used.
-///
-/// Usage example:
-/// ```bash
-/// RAYON_NUM_THREADS=4 cargo build --features parallel
-/// ```
+/// Cached thread pool for parallel operations
 #[cfg(feature = "parallel")]
-pub(crate) fn init_rayon_thread_pool() {
-	static INIT: Once = Once::new();
-	INIT.call_once(|| {
-		// Helper function to compute default (half of cores)
-		let default_threads = || {
-			let logical_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-			(logical_cores / 2).max(1)
-		};
+struct ThreadPoolCache {
+	pool: Arc<rayon::ThreadPool>,
+	num_threads: usize,
+}
 
-		match option_env!("RAYON_NUM_THREADS") {
-			Some(num_threads_str) => {
-				// Variable is set, parse it
-				if let Ok(num_threads) = num_threads_str.parse::<usize>() {
-					if num_threads == 0 {
-						// RAYON_NUM_THREADS=0 means use all CPU cores (rayon default)
-						// Don't set num_threads, let rayon use default
-						let _ = rayon::ThreadPoolBuilder::new().build_global();
-					} else {
-						// RAYON_NUM_THREADS=N (N > 0) means use N threads
-						// Set the environment variable at runtime,
-						// so rayon can use it during initialization
-						std::env::set_var("RAYON_NUM_THREADS", num_threads_str);
-						let _ =
-							rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global();
-					}
-				} else {
-					// Invalid value, use default (half of cores)
-					let _ = rayon::ThreadPoolBuilder::new()
-						.num_threads(default_threads())
-						.build_global();
-				}
-			},
-			None => {
-				// Variable not set, use default (half of cores)
-				let _ =
-					rayon::ThreadPoolBuilder::new().num_threads(default_threads()).build_global();
-			},
+#[cfg(feature = "parallel")]
+static THREAD_POOL_CACHE: RwLock<Option<ThreadPoolCache>> = RwLock::new(None);
+
+/// Helper function to compute default number of threads (half of cores)
+#[cfg(feature = "parallel")]
+fn default_thread_count() -> usize {
+	let logical_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+	(logical_cores / 2).max(1)
+}
+
+/// Get or create a thread pool with the specified number of threads.
+/// If the requested number of threads differs from the cached pool, a new pool is created.
+///
+/// # Arguments
+/// * `num_threads` - Number of threads to use:
+///   - `None` - use default (half of available cores)
+///   - `Some(0)` - use all available cores
+///   - `Some(n)` - use exactly n threads
+#[cfg(feature = "parallel")]
+pub(crate) fn get_thread_pool(num_threads: Option<usize>) -> Result<Arc<rayon::ThreadPool>, Error> {
+	let requested_threads = match num_threads {
+		None => default_thread_count(),
+		Some(0) => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+		Some(n) => n,
+	};
+
+	// Try to get existing pool with matching thread count
+	{
+		let cache = THREAD_POOL_CACHE.read().map_err(|_| Error::Unknown)?;
+		if let Some(ref cached) = *cache {
+			if cached.num_threads == requested_threads {
+				return Ok(Arc::clone(&cached.pool));
+			}
 		}
-	});
+	}
+
+	// Need to create new pool or update existing one
+	{
+		let mut cache = THREAD_POOL_CACHE.write().map_err(|_| Error::Unknown)?;
+
+		// Double-check in case another thread created it
+		if let Some(ref cached) = *cache {
+			if cached.num_threads == requested_threads {
+				return Ok(Arc::clone(&cached.pool));
+			}
+		}
+
+		// Create new pool
+		let pool = rayon::ThreadPoolBuilder::new()
+			.num_threads(requested_threads)
+			.build()
+			.map_err(|_| Error::Unknown)?;
+
+		let new_cache = ThreadPoolCache { pool: Arc::new(pool), num_threads: requested_threads };
+
+		let result = Arc::clone(&new_cache.pool);
+		*cache = Some(new_cache);
+
+		Ok(result)
+	}
 }
 
 /// The index of an erasure chunk.
@@ -211,7 +229,35 @@ pub fn reconstruct_from_systematic<'a>(
 ///
 /// Works only for 1..65536 chunks.
 /// The data must be non-empty.
-pub fn construct_chunks(n_chunks: u16, data: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+///
+/// # Arguments
+/// * `n_chunks` - Number of chunks to create
+/// * `data` - Data to encode
+/// * `num_threads` - Optional number of threads for parallel computation (only with `parallel`
+///   feature):
+///   - `None` - use default (half of available CPU cores)
+///   - `Some(0)` - use all available CPU cores
+///   - `Some(n)` - use exactly n threads
+///
+/// # Example
+/// ```no_run
+/// # use erasure_coding::construct_chunks;
+/// let data = vec![1, 2, 3, 4, 5];
+///
+/// // Use default thread count (half of cores)
+/// let chunks = construct_chunks(16, &data, None).unwrap();
+///
+/// // Use all available cores
+/// let chunks = construct_chunks(16, &data, Some(0)).unwrap();
+///
+/// // Use exactly 4 threads
+/// let chunks = construct_chunks(16, &data, Some(4)).unwrap();
+/// ```
+pub fn construct_chunks(
+	n_chunks: u16,
+	data: &[u8],
+	num_threads: Option<usize>,
+) -> Result<Vec<Vec<u8>>, Error> {
 	if unlikely(data.is_empty()) {
 		return Err(Error::BadPayload);
 	}
@@ -221,20 +267,24 @@ pub fn construct_chunks(n_chunks: u16, data: &[u8]) -> Result<Vec<Vec<u8>>, Erro
 
 	#[cfg(feature = "arena")]
 	{
-		construct_chunks_arena(n_chunks, data)
+		construct_chunks_arena(n_chunks, data, num_threads)
 	}
 
 	#[cfg(not(feature = "arena"))]
 	{
-		construct_chunks_default(n_chunks, data)
+		construct_chunks_default(n_chunks, data, num_threads)
 	}
 }
 
 /// Version without arena allocator
 #[inline]
-fn construct_chunks_default(n_chunks: u16, data: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+fn construct_chunks_default(
+	n_chunks: u16,
+	data: &[u8],
+	num_threads: Option<usize>,
+) -> Result<Vec<Vec<u8>>, Error> {
 	let systematic = systematic_recovery_threshold(n_chunks)?;
-	let original_data = make_original_shards(systematic, data);
+	let original_data = make_original_shards(systematic, data, num_threads)?;
 	let original_iter = original_data.iter();
 	let original_count = systematic as usize;
 	let recovery_count = (n_chunks - systematic) as usize;
@@ -249,7 +299,11 @@ fn construct_chunks_default(n_chunks: u16, data: &[u8]) -> Result<Vec<Vec<u8>>, 
 
 /// Optimized version with arena allocator
 #[cfg(feature = "arena")]
-fn construct_chunks_arena(n_chunks: u16, data: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+fn construct_chunks_arena(
+	n_chunks: u16,
+	data: &[u8],
+	_num_threads: Option<usize>,
+) -> Result<Vec<Vec<u8>>, Error> {
 	let systematic = systematic_recovery_threshold(n_chunks)?;
 	let original_count = systematic as usize;
 	let recovery_count = (n_chunks - systematic) as usize;
@@ -307,7 +361,11 @@ fn shard_bytes(systematic: u16, data_len: usize) -> usize {
 }
 
 // The reed-solomon library takes sharded data as input.
-fn make_original_shards(original_count: u16, data: &[u8]) -> Vec<Vec<u8>> {
+fn make_original_shards(
+	original_count: u16,
+	data: &[u8],
+	num_threads: Option<usize>,
+) -> Result<Vec<Vec<u8>>, Error> {
 	assert!(!data.is_empty(), "data must be non-empty");
 	assert_ne!(original_count, 0);
 
@@ -316,6 +374,8 @@ fn make_original_shards(original_count: u16, data: &[u8]) -> Vec<Vec<u8>> {
 
 	#[cfg(not(feature = "parallel"))]
 	{
+		let _ = num_threads; // Unused in sequential mode
+
 		// Optimized sequential version with prefetch
 		let mut result = Vec::with_capacity(original_count as usize);
 		let mut remaining_data = data;
@@ -346,30 +406,32 @@ fn make_original_shards(original_count: u16, data: &[u8]) -> Vec<Vec<u8>> {
 
 			result.push(chunk);
 		}
-		result
+		Ok(result)
 	}
 
 	#[cfg(feature = "parallel")]
 	{
-		// Initialize the thread pool on first use
-		init_rayon_thread_pool();
+		// Get or create thread pool with requested thread count
+		let pool = get_thread_pool(num_threads)?;
 
 		// Parallel version: create shards in parallel
-		(0..original_count as usize)
-			.into_par_iter()
-			.map(|i| {
-				let mut chunk = vec![0u8; shard_bytes];
-				let start = i * shard_bytes;
-				let end = (start + shard_bytes).min(data.len());
+		Ok(pool.install(|| {
+			(0..original_count as usize)
+				.into_par_iter()
+				.map(|i| {
+					let mut chunk = vec![0u8; shard_bytes];
+					let start = i * shard_bytes;
+					let end = (start + shard_bytes).min(data.len());
 
-				if likely(start < data.len()) {
-					let copy_len = end - start;
-					chunk[..copy_len].copy_from_slice(&data[start..end]);
-				}
+					if likely(start < data.len()) {
+						let copy_len = end - start;
+						chunk[..copy_len].copy_from_slice(&data[start..end]);
+					}
 
-				chunk
-			})
-			.collect()
+					chunk
+				})
+				.collect()
+		}))
 	}
 }
 
@@ -465,7 +527,7 @@ mod tests {
 			let n_chunks = n_chunks.max(1).min(MAX_CHUNKS);
 			let threshold = systematic_recovery_threshold(n_chunks).unwrap();
 			let data_len = available_data.0.len();
-			let chunks = construct_chunks(n_chunks, &available_data.0).unwrap();
+			let chunks = construct_chunks(n_chunks, &available_data.0, None).unwrap();
 			let reconstructed: Vec<u8> = reconstruct_from_systematic(
 				n_chunks,
 				chunks.len(),
@@ -485,7 +547,7 @@ mod tests {
 			let n_chunks = n_chunks.max(1).min(MAX_CHUNKS);
 			let data_len = available_data.0.len();
 			let threshold = recovery_threshold(n_chunks).unwrap();
-			let chunks = construct_chunks(n_chunks, &available_data.0).unwrap();
+			let chunks = construct_chunks(n_chunks, &available_data.0, None).unwrap();
 			let map: HashMap<ChunkIndex, Vec<u8>> = chunks
 				.into_iter()
 				.enumerate()
@@ -503,10 +565,10 @@ mod tests {
 	fn proof_verification_works() {
 		fn property(data: SmallAvailableData, n_chunks: u16) {
 			let n_chunks = n_chunks.max(1).min(2048);
-			let chunks = construct_chunks(n_chunks, &data.0).unwrap();
+			let chunks = construct_chunks(n_chunks, &data.0, None).unwrap();
 			assert_eq!(chunks.len() as u16, n_chunks);
 
-			let iter = MerklizedChunks::compute(chunks.clone());
+			let iter = MerklizedChunks::compute(chunks.clone(), None).unwrap();
 			let root = iter.root();
 			let erasure_chunks: Vec<_> = iter.collect();
 
@@ -554,7 +616,7 @@ mod tests {
 				let original_data: Vec<u8> = (0..*data_size).map(|_| rng.gen()).collect();
 
 				// Encode data
-				let chunks = construct_chunks(n_chunks, &original_data).unwrap();
+				let chunks = construct_chunks(n_chunks, &original_data, None).unwrap();
 				assert_eq!(chunks.len(), n_chunks as usize);
 
 				// Get minimum threshold for recovery
@@ -607,5 +669,55 @@ mod tests {
 		}
 
 		println!("✓ All stress tests passed!");
+	}
+
+	#[test]
+	#[cfg(feature = "parallel")]
+	fn test_thread_pool_configurations() {
+		use std::thread::available_parallelism;
+
+		let data = vec![1u8; 1024];
+		let n_chunks = 16;
+
+		// Test with None - should use default (half of cores)
+		let chunks = construct_chunks(n_chunks, &data, None).unwrap();
+		assert_eq!(chunks.len(), n_chunks as usize);
+
+		// Test with Some(0) - should use all available cores
+		let all_cores = available_parallelism().map(|n| n.get()).unwrap_or(1);
+		let chunks = construct_chunks(n_chunks, &data, Some(0)).unwrap();
+		assert_eq!(chunks.len(), n_chunks as usize);
+
+		// Verify that pool was created with all cores
+		let pool = get_thread_pool(Some(0)).unwrap();
+		assert_eq!(
+			pool.current_num_threads(),
+			all_cores,
+			"Thread pool with num_threads=0 should use all logical cores"
+		);
+
+		// Test with Some(2) - should use exactly 2 threads
+		let chunks = construct_chunks(n_chunks, &data, Some(2)).unwrap();
+		assert_eq!(chunks.len(), n_chunks as usize);
+
+		let pool = get_thread_pool(Some(2)).unwrap();
+		assert_eq!(
+			pool.current_num_threads(),
+			2,
+			"Thread pool with num_threads=2 should use exactly 2 threads"
+		);
+
+		// Test with Some(4) - should use exactly 4 threads
+		let chunks = construct_chunks(n_chunks, &data, Some(4)).unwrap();
+		assert_eq!(chunks.len(), n_chunks as usize);
+
+		let pool = get_thread_pool(Some(4)).unwrap();
+		assert_eq!(
+			pool.current_num_threads(),
+			4,
+			"Thread pool with num_threads=4 should use exactly 4 threads"
+		);
+
+		println!("✓ Thread pool configuration test passed!");
 	}
 }
