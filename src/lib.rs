@@ -15,11 +15,8 @@ use scale::{Decode, Encode};
 use std::ops::AddAssign;
 pub use subshard::*;
 
-#[cfg(feature = "parallel")]
 use rayon::prelude::*;
-
-#[cfg(feature = "parallel")]
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[cfg(feature = "arena")]
 use bumpalo::Bump;
@@ -56,72 +53,41 @@ pub const MAX_CHUNKS: u16 = 16384;
 // The reed-solomon library requires each shards to be 64 bytes aligned.
 const SHARD_ALIGNMENT: usize = 64;
 
-/// Cached thread pool for parallel operations
-#[cfg(feature = "parallel")]
-struct ThreadPoolCache {
-	pool: Arc<rayon::ThreadPool>,
-	num_threads: usize,
+#[derive(Clone)]
+pub enum ThreadMode {
+	Multi(Arc<rayon::ThreadPool>),
+	Single,
 }
 
-#[cfg(feature = "parallel")]
-static THREAD_POOL_CACHE: RwLock<Option<ThreadPoolCache>> = RwLock::new(None);
+impl ThreadMode {
+	pub fn multi_with_num_threads(num_threads: Option<usize>) -> Result<Self, Error> {
+		let threads = match num_threads {
+			None => {
+				let logical_cores =
+					std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+				(logical_cores / 2).max(1)
+			},
+			Some(0) => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+			Some(n) => n,
+		};
 
-/// Helper function to compute default number of threads (half of cores)
-#[cfg(feature = "parallel")]
-fn default_thread_count() -> usize {
-	let logical_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-	(logical_cores / 2).max(1)
-}
-
-/// Get or create a thread pool with the specified number of threads.
-/// If the requested number of threads differs from the cached pool, a new pool is created.
-///
-/// # Arguments
-/// * `num_threads` - Number of threads to use:
-///   - `None` - use default (half of available cores)
-///   - `Some(0)` - use all available cores
-///   - `Some(n)` - use exactly n threads
-#[cfg(feature = "parallel")]
-pub(crate) fn get_thread_pool(num_threads: Option<usize>) -> Result<Arc<rayon::ThreadPool>, Error> {
-	let requested_threads = match num_threads {
-		None => default_thread_count(),
-		Some(0) => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
-		Some(n) => n,
-	};
-
-	// Try to get existing pool with matching thread count
-	{
-		let cache = THREAD_POOL_CACHE.read().map_err(|_| Error::Unknown)?;
-		if let Some(ref cached) = *cache {
-			if cached.num_threads == requested_threads {
-				return Ok(Arc::clone(&cached.pool));
-			}
-		}
-	}
-
-	// Need to create new pool or update existing one
-	{
-		let mut cache = THREAD_POOL_CACHE.write().map_err(|_| Error::Unknown)?;
-
-		// Double-check in case another thread created it
-		if let Some(ref cached) = *cache {
-			if cached.num_threads == requested_threads {
-				return Ok(Arc::clone(&cached.pool));
-			}
-		}
-
-		// Create new pool
 		let pool = rayon::ThreadPoolBuilder::new()
-			.num_threads(requested_threads)
+			.num_threads(threads)
 			.build()
 			.map_err(|_| Error::Unknown)?;
 
-		let new_cache = ThreadPoolCache { pool: Arc::new(pool), num_threads: requested_threads };
+		Ok(ThreadMode::Multi(Arc::new(pool)))
+	}
 
-		let result = Arc::clone(&new_cache.pool);
-		*cache = Some(new_cache);
+	pub fn single() -> Self {
+		ThreadMode::Single
+	}
 
-		Ok(result)
+	pub fn num_threads(&self) -> usize {
+		match self {
+			ThreadMode::Multi(pool) => pool.current_num_threads(),
+			ThreadMode::Single => 1,
+		}
 	}
 }
 
@@ -229,34 +195,10 @@ pub fn reconstruct_from_systematic<'a>(
 ///
 /// Works only for 1..65536 chunks.
 /// The data must be non-empty.
-///
-/// # Arguments
-/// * `n_chunks` - Number of chunks to create
-/// * `data` - Data to encode
-/// * `num_threads` - Optional number of threads for parallel computation (only with `parallel`
-///   feature):
-///   - `None` - use default (half of available CPU cores)
-///   - `Some(0)` - use all available CPU cores
-///   - `Some(n)` - use exactly n threads
-///
-/// # Example
-/// ```no_run
-/// # use erasure_coding::construct_chunks;
-/// let data = vec![1, 2, 3, 4, 5];
-///
-/// // Use default thread count (half of cores)
-/// let chunks = construct_chunks(16, &data, None).unwrap();
-///
-/// // Use all available cores
-/// let chunks = construct_chunks(16, &data, Some(0)).unwrap();
-///
-/// // Use exactly 4 threads
-/// let chunks = construct_chunks(16, &data, Some(4)).unwrap();
-/// ```
 pub fn construct_chunks(
 	n_chunks: u16,
 	data: &[u8],
-	num_threads: Option<usize>,
+	mode: &ThreadMode,
 ) -> Result<Vec<Vec<u8>>, Error> {
 	if unlikely(data.is_empty()) {
 		return Err(Error::BadPayload);
@@ -267,24 +209,27 @@ pub fn construct_chunks(
 
 	#[cfg(feature = "arena")]
 	{
-		construct_chunks_arena(n_chunks, data, num_threads)
+		construct_chunks_arena(n_chunks, data, mode)
 	}
 
 	#[cfg(not(feature = "arena"))]
 	{
-		construct_chunks_default(n_chunks, data, num_threads)
+		construct_chunks_default(n_chunks, data, mode)
 	}
 }
 
-/// Version without arena allocator
+/// Construct erasure-coded chunks.
+///
+/// Works only for 1..65536 chunks.
+/// The data must be non-empty.
 #[inline]
 fn construct_chunks_default(
 	n_chunks: u16,
 	data: &[u8],
-	num_threads: Option<usize>,
+	mode: &ThreadMode,
 ) -> Result<Vec<Vec<u8>>, Error> {
 	let systematic = systematic_recovery_threshold(n_chunks)?;
-	let original_data = make_original_shards(systematic, data, num_threads)?;
+	let original_data = make_original_shards(systematic, data, mode)?;
 	let original_iter = original_data.iter();
 	let original_count = systematic as usize;
 	let recovery_count = (n_chunks - systematic) as usize;
@@ -297,12 +242,11 @@ fn construct_chunks_default(
 	Ok(result)
 }
 
-/// Optimized version with arena allocator
 #[cfg(feature = "arena")]
 fn construct_chunks_arena(
 	n_chunks: u16,
 	data: &[u8],
-	_num_threads: Option<usize>,
+	_mode: &ThreadMode,
 ) -> Result<Vec<Vec<u8>>, Error> {
 	let systematic = systematic_recovery_threshold(n_chunks)?;
 	let original_count = systematic as usize;
@@ -332,15 +276,12 @@ fn make_original_shards_arena(
 	data: &[u8],
 	shard_size: usize,
 ) -> Vec<Vec<u8>> {
-	// Optimization: use single large buffer instead of multiple Vecs
 	let total_size = original_count as usize * shard_size;
 	let mut flat_buffer = vec![0u8; total_size];
 
-	// Copy data to flat buffer in one call
 	let data_to_copy = data.len().min(total_size);
 	flat_buffer[..data_to_copy].copy_from_slice(&data[..data_to_copy]);
 
-	// Slice flat buffer into chunks without additional copying
 	let mut result = Vec::with_capacity(original_count as usize);
 	for chunk_data in flat_buffer.chunks_exact(shard_size) {
 		result.push(chunk_data.to_vec());
@@ -364,7 +305,7 @@ fn shard_bytes(systematic: u16, data_len: usize) -> usize {
 fn make_original_shards(
 	original_count: u16,
 	data: &[u8],
-	num_threads: Option<usize>,
+	mode: &ThreadMode,
 ) -> Result<Vec<Vec<u8>>, Error> {
 	assert!(!data.is_empty(), "data must be non-empty");
 	assert_ne!(original_count, 0);
@@ -372,50 +313,8 @@ fn make_original_shards(
 	let shard_bytes = shard_bytes(original_count, data.len());
 	assert_ne!(shard_bytes, 0);
 
-	#[cfg(not(feature = "parallel"))]
-	{
-		let _ = num_threads; // Unused in sequential mode
-
-		// Optimized sequential version with prefetch
-		let mut result = Vec::with_capacity(original_count as usize);
-		let mut remaining_data = data;
-
-		for i in 0..original_count as usize {
-			let mut chunk = vec![0u8; shard_bytes];
-			let copy_len = remaining_data.len().min(shard_bytes);
-
-			// Prefetch next data block
-			#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-			if i + 1 < original_count as usize && remaining_data.len() > shard_bytes {
-				unsafe {
-					let next_ptr = remaining_data.as_ptr().add(shard_bytes);
-					if (remaining_data.len() - shard_bytes) >= 64 {
-						_mm_prefetch(next_ptr as *const i8, _MM_HINT_T0);
-					}
-				}
-			}
-
-			// Optimized copying (compiler uses memcpy/SIMD)
-			chunk[..copy_len].copy_from_slice(&remaining_data[..copy_len]);
-
-			if likely(remaining_data.len() >= shard_bytes) {
-				remaining_data = &remaining_data[shard_bytes..];
-			} else {
-				remaining_data = &[];
-			}
-
-			result.push(chunk);
-		}
-		Ok(result)
-	}
-
-	#[cfg(feature = "parallel")]
-	{
-		// Get or create thread pool with requested thread count
-		let pool = get_thread_pool(num_threads)?;
-
-		// Parallel version: create shards in parallel
-		Ok(pool.install(|| {
+	match mode {
+		ThreadMode::Multi(pool) => Ok(pool.install(|| {
 			(0..original_count as usize)
 				.into_par_iter()
 				.map(|i| {
@@ -431,7 +330,37 @@ fn make_original_shards(
 					chunk
 				})
 				.collect()
-		}))
+		})),
+		ThreadMode::Single => {
+			let mut result = Vec::with_capacity(original_count as usize);
+			let mut remaining_data = data;
+
+			for i in 0..original_count as usize {
+				let mut chunk = vec![0u8; shard_bytes];
+				let copy_len = remaining_data.len().min(shard_bytes);
+
+				#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+				if i + 1 < original_count as usize && remaining_data.len() > shard_bytes {
+					unsafe {
+						let next_ptr = remaining_data.as_ptr().add(shard_bytes);
+						if (remaining_data.len() - shard_bytes) >= 64 {
+							_mm_prefetch(next_ptr as *const i8, _MM_HINT_T0);
+						}
+					}
+				}
+
+				chunk[..copy_len].copy_from_slice(&remaining_data[..copy_len]);
+
+				if likely(remaining_data.len() >= shard_bytes) {
+					remaining_data = &remaining_data[shard_bytes..];
+				} else {
+					remaining_data = &[];
+				}
+
+				result.push(chunk);
+			}
+			Ok(result)
+		},
 	}
 }
 
@@ -527,15 +456,19 @@ mod tests {
 			let n_chunks = n_chunks.max(1).min(MAX_CHUNKS);
 			let threshold = systematic_recovery_threshold(n_chunks).unwrap();
 			let data_len = available_data.0.len();
-			let chunks = construct_chunks(n_chunks, &available_data.0, None).unwrap();
-			let reconstructed: Vec<u8> = reconstruct_from_systematic(
-				n_chunks,
-				chunks.len(),
-				&mut chunks.iter().take(threshold as usize).map(Vec::as_slice),
-				data_len,
-			)
-			.unwrap();
-			assert_eq!(reconstructed, available_data.0);
+
+			for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
+				let chunks = construct_chunks(n_chunks, &available_data.0, &mode).unwrap();
+
+				let reconstructed: Vec<u8> = reconstruct_from_systematic(
+					n_chunks,
+					chunks.len(),
+					&mut chunks.iter().take(threshold as usize).map(Vec::as_slice),
+					data_len,
+				)
+				.unwrap();
+				assert_eq!(reconstructed, available_data.0);
+			}
 		}
 
 		QuickCheck::new().quickcheck(property as fn(ArbitraryAvailableData, u16))
@@ -547,15 +480,18 @@ mod tests {
 			let n_chunks = n_chunks.max(1).min(MAX_CHUNKS);
 			let data_len = available_data.0.len();
 			let threshold = recovery_threshold(n_chunks).unwrap();
-			let chunks = construct_chunks(n_chunks, &available_data.0, None).unwrap();
-			let map: HashMap<ChunkIndex, Vec<u8>> = chunks
-				.into_iter()
-				.enumerate()
-				.map(|(i, v)| (ChunkIndex::from(i as u16), v))
-				.collect();
-			let some_chunks = map.into_iter().take(threshold as usize);
-			let reconstructed: Vec<u8> = reconstruct(n_chunks, some_chunks, data_len).unwrap();
-			assert_eq!(reconstructed, available_data.0);
+
+			for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
+				let chunks = construct_chunks(n_chunks, &available_data.0, &mode).unwrap();
+				let map: HashMap<ChunkIndex, Vec<u8>> = chunks
+					.into_iter()
+					.enumerate()
+					.map(|(i, v)| (ChunkIndex::from(i as u16), v))
+					.collect();
+				let some_chunks = map.into_iter().take(threshold as usize);
+				let reconstructed: Vec<u8> = reconstruct(n_chunks, some_chunks, data_len).unwrap();
+				assert_eq!(reconstructed, available_data.0);
+			}
 		}
 
 		QuickCheck::new().quickcheck(property as fn(ArbitraryAvailableData, u16))
@@ -565,24 +501,26 @@ mod tests {
 	fn proof_verification_works() {
 		fn property(data: SmallAvailableData, n_chunks: u16) {
 			let n_chunks = n_chunks.max(1).min(2048);
-			let chunks = construct_chunks(n_chunks, &data.0, None).unwrap();
-			assert_eq!(chunks.len() as u16, n_chunks);
 
-			let iter = MerklizedChunks::compute(chunks.clone(), None).unwrap();
-			let root = iter.root();
-			let erasure_chunks: Vec<_> = iter.collect();
+			for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
+				let chunks = construct_chunks(n_chunks, &data.0, &mode).unwrap();
+				assert_eq!(chunks.len() as u16, n_chunks);
+				let iter = MerklizedChunks::compute(chunks.clone(), &mode).unwrap();
+				let root = iter.root();
+				let erasure_chunks: Vec<_> = iter.collect();
 
-			assert_eq!(erasure_chunks.len(), chunks.len());
+				assert_eq!(erasure_chunks.len(), chunks.len());
 
-			for erasure_chunk in erasure_chunks.into_iter() {
-				let encode = Encode::encode(&erasure_chunk.proof);
-				let decode = Decode::decode(&mut &encode[..]).unwrap();
-				assert_eq!(erasure_chunk.proof, decode);
-				assert_eq!(encode, Encode::encode(&decode));
+				for erasure_chunk in erasure_chunks.into_iter() {
+					let encode = Encode::encode(&erasure_chunk.proof);
+					let decode = Decode::decode(&mut &encode[..]).unwrap();
+					assert_eq!(erasure_chunk.proof, decode);
+					assert_eq!(encode, Encode::encode(&decode));
 
-				assert_eq!(&erasure_chunk.chunk, &chunks[erasure_chunk.index.0 as usize]);
+					assert_eq!(&erasure_chunk.chunk, &chunks[erasure_chunk.index.0 as usize]);
 
-				assert!(erasure_chunk.verify(&root));
+					assert!(erasure_chunk.verify(&root));
+				}
 			}
 		}
 
@@ -593,76 +531,64 @@ mod tests {
 	fn stress_test_various_sizes_with_random_chunk_loss() {
 		use rand::{seq::SliceRandom, Rng, SeedableRng};
 
-		// Data sizes for testing
 		let data_sizes = vec![10, 1000, 10_000, 100_000, 1_000_000, 10_000_000, 50_000_000];
 
-		// Various chunk configurations for testing
 		let chunk_configs = vec![16, 64, 256, 1024];
 
 		for data_size in data_sizes.iter() {
 			println!("Testing data size: {} bytes", data_size);
 
 			for &n_chunks in chunk_configs.iter() {
-				// Skip too large configurations for small data
 				if *data_size < 1000 && n_chunks > 64 {
 					continue;
 				}
 
 				println!("  Testing with {} chunks", n_chunks);
 
-				// Generate random data with fixed seed for reproducibility
 				let mut rng =
 					rand::rngs::SmallRng::seed_from_u64((*data_size as u64) ^ (n_chunks as u64));
 				let original_data: Vec<u8> = (0..*data_size).map(|_| rng.gen()).collect();
 
-				// Encode data
-				let chunks = construct_chunks(n_chunks, &original_data, None).unwrap();
-				assert_eq!(chunks.len(), n_chunks as usize);
+				for (mode_name, mode) in [
+					("Single", ThreadMode::single()),
+					("Multi", ThreadMode::multi_with_num_threads(None).unwrap()),
+				] {
+					let chunks = construct_chunks(n_chunks, &original_data, &mode).unwrap();
 
-				// Get minimum threshold for recovery
-				let threshold = recovery_threshold(n_chunks).unwrap() as usize;
+					assert_eq!(chunks.len(), n_chunks as usize);
 
-				// Create indices of all chunks
-				let mut chunk_indices: Vec<usize> = (0..n_chunks as usize).collect();
+					let threshold = recovery_threshold(n_chunks).unwrap() as usize;
 
-				// Shuffle indices
-				chunk_indices.shuffle(&mut rng);
+					let mut chunk_indices: Vec<usize> = (0..n_chunks as usize).collect();
 
-				// Take only threshold chunks (minimum required amount)
-				let selected_indices = &chunk_indices[..threshold];
+					chunk_indices.shuffle(&mut rng);
 
-				// Create map with selected chunks
-				let available_chunks: HashMap<ChunkIndex, Vec<u8>> = selected_indices
-					.iter()
-					.map(|&idx| (ChunkIndex(idx as u16), chunks[idx].clone()))
-					.collect();
+					let selected_indices = &chunk_indices[..threshold];
 
-				println!(
-					"    Using {} chunks out of {} (threshold: {})",
-					available_chunks.len(),
-					n_chunks,
-					threshold
-				);
+					let available_chunks: HashMap<ChunkIndex, Vec<u8>> = selected_indices
+						.iter()
+						.map(|&idx| (ChunkIndex(idx as u16), chunks[idx].clone()))
+						.collect();
 
-				// Recover data from available chunks
-				let reconstructed =
-					reconstruct(n_chunks, available_chunks.into_iter(), original_data.len())
-						.unwrap();
+					let reconstructed =
+						reconstruct(n_chunks, available_chunks.into_iter(), original_data.len())
+							.unwrap();
 
-				// Verify that reconstructed data matches original
-				assert_eq!(
-					reconstructed.len(),
-					original_data.len(),
-					"Reconstructed data length mismatch for size {} with {} chunks",
-					data_size,
-					n_chunks
-				);
+					assert_eq!(
+						reconstructed.len(),
+						original_data.len(),
+						"Reconstructed data length mismatch for size {} with {} chunks (mode: {})",
+						data_size,
+						n_chunks,
+						mode_name
+					);
 
-				assert_eq!(
-					reconstructed, original_data,
-					"Reconstructed data does not match original for size {} with {} chunks",
-					data_size, n_chunks
-				);
+					assert_eq!(
+						reconstructed, original_data,
+						"Reconstructed data does not match original for size {} with {} chunks (mode: {})",
+						data_size, n_chunks, mode_name
+					);
+				}
 			}
 
 			println!("  ✓ All chunk configurations passed for size {}", data_size);
@@ -672,52 +598,56 @@ mod tests {
 	}
 
 	#[test]
-	#[cfg(feature = "parallel")]
-	fn test_thread_pool_configurations() {
+	fn test_thread_mode_configurations() {
 		use std::thread::available_parallelism;
 
 		let data = vec![1u8; 1024];
 		let n_chunks = 16;
 
-		// Test with None - should use default (half of cores)
-		let chunks = construct_chunks(n_chunks, &data, None).unwrap();
+		let mode_default = ThreadMode::multi_with_num_threads(None).unwrap();
+		let logical_cores = available_parallelism().map(|n| n.get()).unwrap_or(1);
+		let expected_default = (logical_cores / 2).max(1);
+		assert_eq!(
+			mode_default.num_threads(),
+			expected_default,
+			"Thread mode with None should use half of logical cores"
+		);
+		let chunks = construct_chunks(n_chunks, &data, &mode_default).unwrap();
 		assert_eq!(chunks.len(), n_chunks as usize);
 
-		// Test with Some(0) - should use all available cores
 		let all_cores = available_parallelism().map(|n| n.get()).unwrap_or(1);
-		let chunks = construct_chunks(n_chunks, &data, Some(0)).unwrap();
-		assert_eq!(chunks.len(), n_chunks as usize);
-
-		// Verify that pool was created with all cores
-		let pool = get_thread_pool(Some(0)).unwrap();
+		let mode_all = ThreadMode::multi_with_num_threads(Some(0)).unwrap();
 		assert_eq!(
-			pool.current_num_threads(),
+			mode_all.num_threads(),
 			all_cores,
-			"Thread pool with num_threads=0 should use all logical cores"
+			"Thread mode with Some(0) should use all logical cores"
 		);
-
-		// Test with Some(2) - should use exactly 2 threads
-		let chunks = construct_chunks(n_chunks, &data, Some(2)).unwrap();
+		let chunks = construct_chunks(n_chunks, &data, &mode_all).unwrap();
 		assert_eq!(chunks.len(), n_chunks as usize);
 
-		let pool = get_thread_pool(Some(2)).unwrap();
+		let mode_2 = ThreadMode::multi_with_num_threads(Some(2)).unwrap();
 		assert_eq!(
-			pool.current_num_threads(),
+			mode_2.num_threads(),
 			2,
-			"Thread pool with num_threads=2 should use exactly 2 threads"
+			"Thread mode with Some(2) should use exactly 2 threads"
 		);
-
-		// Test with Some(4) - should use exactly 4 threads
-		let chunks = construct_chunks(n_chunks, &data, Some(4)).unwrap();
+		let chunks = construct_chunks(n_chunks, &data, &mode_2).unwrap();
 		assert_eq!(chunks.len(), n_chunks as usize);
 
-		let pool = get_thread_pool(Some(4)).unwrap();
+		let mode_4 = ThreadMode::multi_with_num_threads(Some(4)).unwrap();
 		assert_eq!(
-			pool.current_num_threads(),
+			mode_4.num_threads(),
 			4,
-			"Thread pool with num_threads=4 should use exactly 4 threads"
+			"Thread mode with Some(4) should use exactly 4 threads"
 		);
+		let chunks = construct_chunks(n_chunks, &data, &mode_4).unwrap();
+		assert_eq!(chunks.len(), n_chunks as usize);
 
-		println!("✓ Thread pool configuration test passed!");
+		let mode_single = ThreadMode::single();
+		assert_eq!(mode_single.num_threads(), 1, "Single thread mode should report 1 thread");
+		let chunks = construct_chunks(n_chunks, &data, &mode_single).unwrap();
+		assert_eq!(chunks.len(), n_chunks as usize);
+
+		println!("✓ Thread mode configuration test passed!");
 	}
 }

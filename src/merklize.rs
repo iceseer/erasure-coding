@@ -6,11 +6,8 @@ use scale::{Decode, Encode};
 
 use blake2b_simd::{blake2b as hash_fn, Hash as InnerHash, State as InnerHasher};
 
-#[cfg(feature = "parallel")]
+use crate::ThreadMode;
 use rayon::prelude::*;
-
-#[cfg(feature = "parallel")]
-use crate::get_thread_pool;
 
 // Binary Merkle Tree with 16-bit `ChunkIndex` has depth at most 17.
 // The proof has at most `depth - 1` length.
@@ -127,39 +124,16 @@ impl Iterator for MerklizedChunks {
 
 impl MerklizedChunks {
 	/// Compute `MerklizedChunks` from a list of erasure chunks.
-	///
-	/// # Arguments
-	/// * `chunks` - Vector of erasure-coded chunks
-	/// * `num_threads` - Optional number of threads for parallel computation (only with `parallel`
-	///   feature):
-	///   - `None` - use default (half of available CPU cores)
-	///   - `Some(0)` - use all available CPU cores
-	///   - `Some(n)` - use exactly n threads
-	pub fn compute(chunks: Vec<Vec<u8>>, num_threads: Option<usize>) -> Result<Self, Error> {
+	pub fn compute(chunks: Vec<Vec<u8>>, mode: &ThreadMode) -> Result<Self, Error> {
 		let chunks_len = chunks.len();
 		let target_size = chunks_len.next_power_of_two();
 
-		// Parallel chunk hashing
-		#[cfg(feature = "parallel")]
-		let mut hashes: Vec<Hash> = {
-			// Use custom thread pool for parallel operations
-			let pool = get_thread_pool(num_threads)?;
-
-			pool.install(|| {
+		let mut hashes: Vec<Hash> = match mode {
+			ThreadMode::Multi(pool) => pool.install(|| {
 				chunks.par_iter().map(|chunk| Hash::from(hash_fn(chunk))).collect::<Vec<_>>()
-			})
-		};
-
-		#[cfg(not(feature = "parallel"))]
-		let mut hashes = {
-			let _ = num_threads; // Unused in sequential mode
-
-			let mut h = Vec::with_capacity(target_size);
-			for chunk in chunks.iter() {
-				let hash = hash_fn(chunk);
-				h.push(Hash::from(hash));
-			}
-			h
+			}),
+			ThreadMode::Single =>
+				chunks.iter().map(|chunk| Hash::from(hash_fn(chunk))).collect::<Vec<_>>(),
 		};
 
 		hashes.resize(target_size, Hash::default());
@@ -174,7 +148,6 @@ impl MerklizedChunks {
 
 		tree[0] = hashes;
 
-		// Build the tree bottom-up.
 		for lvl in 1..depth {
 			let len = 2usize.pow((depth - 1 - lvl) as u32);
 			tree[lvl].resize(len, Hash::default());
@@ -183,24 +156,19 @@ impl MerklizedChunks {
 			let prev = &*prev_slice.last().unwrap();
 			let out = &mut out_slice[0];
 
-			// Parallel tree level construction
-			#[cfg(feature = "parallel")]
-			{
-				// Use custom thread pool for parallel operations
-				let pool = get_thread_pool(num_threads)?;
-
-				pool.install(|| {
-					out.par_iter_mut().enumerate().for_each(|(i, out_val)| {
+			match mode {
+				ThreadMode::Multi(pool) => {
+					pool.install(|| {
+						out.par_iter_mut().enumerate().for_each(|(i, out_val)| {
+							*out_val = combine(prev[2 * i], prev[2 * i + 1]);
+						});
+					});
+				},
+				ThreadMode::Single => {
+					out.iter_mut().enumerate().for_each(|(i, out_val)| {
 						*out_val = combine(prev[2 * i], prev[2 * i + 1]);
 					});
-				});
-			}
-
-			#[cfg(not(feature = "parallel"))]
-			{
-				out.iter_mut().enumerate().for_each(|(i, out_val)| {
-					*out_val = combine(prev[2 * i], prev[2 * i + 1]);
-				});
+				},
 			}
 		}
 
@@ -261,58 +229,65 @@ mod tests {
 	#[test]
 	fn zero_chunks_works() {
 		let chunks = vec![];
-		let iter = MerklizedChunks::compute(chunks.clone(), None).unwrap();
-		let root = iter.root();
-		let erasure_chunks: Vec<ErasureChunk> = iter.collect();
-		assert_eq!(erasure_chunks.len(), chunks.len());
-		assert_eq!(root, ErasureRoot(Hash::default()));
+
+		for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
+			let iter = MerklizedChunks::compute(chunks.clone(), &mode).unwrap();
+
+			let root = iter.root();
+			let erasure_chunks: Vec<ErasureChunk> = iter.collect();
+			assert_eq!(erasure_chunks.len(), chunks.len());
+			assert_eq!(root, ErasureRoot(Hash::default()));
+		}
 	}
 
 	#[test]
 	fn iter_works() {
 		let chunks = vec![vec![1], vec![2], vec![3]];
-		let iter = MerklizedChunks::compute(chunks.clone(), None).unwrap();
-		let root = iter.root();
-		let erasure_chunks: Vec<ErasureChunk> = iter.collect();
-		assert_eq!(erasure_chunks.len(), chunks.len());
 
-		// compute the proof manually
-		let proof_0 = {
-			let a0 = hash_fn(&chunks[0]).into();
-			let a1 = hash_fn(&chunks[1]).into();
-			let a2 = hash_fn(&chunks[2]).into();
-			let a3 = Hash::default();
+		for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
+			let iter = MerklizedChunks::compute(chunks.clone(), &mode).unwrap();
 
-			let b0 = combine(a0, a1);
-			let b1 = combine(a2, a3);
+			let root = iter.root();
+			let erasure_chunks: Vec<ErasureChunk> = iter.collect();
+			assert_eq!(erasure_chunks.len(), chunks.len());
 
-			let c0 = combine(b0, b1);
+			let proof_0 = {
+				let a0 = hash_fn(&chunks[0]).into();
+				let a1 = hash_fn(&chunks[1]).into();
+				let a2 = hash_fn(&chunks[2]).into();
+				let a3 = Hash::default();
 
-			assert_eq!(c0, root.0);
+				let b0 = combine(a0, a1);
+				let b1 = combine(a2, a3);
 
-			let p = vec![a1, b1];
-			Proof::try_from(p).unwrap()
-		};
+				let c0 = combine(b0, b1);
 
-		assert_eq!(erasure_chunks[0].proof, proof_0);
+				assert_eq!(c0, root.0);
 
-		let invalid_1 = ErasureChunk {
-			chunk: erasure_chunks[0].chunk.clone(),
-			proof: erasure_chunks[0].proof.clone(),
-			index: ChunkIndex(erasure_chunks[0].index.0 + 1),
-		};
+				let p = vec![a1, b1];
+				Proof::try_from(p).unwrap()
+			};
 
-		let invalid_2 = ErasureChunk {
-			chunk: erasure_chunks[0].chunk.clone(),
-			proof: erasure_chunks[0].proof.clone(),
-			index: ChunkIndex(erasure_chunks[0].index.0 | 1 << 15),
-		};
+			assert_eq!(erasure_chunks[0].proof, proof_0);
 
-		assert!(!invalid_1.verify(&root));
-		assert!(!invalid_2.verify(&root));
+			let invalid_1 = ErasureChunk {
+				chunk: erasure_chunks[0].chunk.clone(),
+				proof: erasure_chunks[0].proof.clone(),
+				index: ChunkIndex(erasure_chunks[0].index.0 + 1),
+			};
 
-		for chunk in erasure_chunks {
-			assert!(chunk.verify(&root));
+			let invalid_2 = ErasureChunk {
+				chunk: erasure_chunks[0].chunk.clone(),
+				proof: erasure_chunks[0].proof.clone(),
+				index: ChunkIndex(erasure_chunks[0].index.0 | 1 << 15),
+			};
+
+			assert!(!invalid_1.verify(&root));
+			assert!(!invalid_2.verify(&root));
+
+			for chunk in erasure_chunks {
+				assert!(chunk.verify(&root));
+			}
 		}
 	}
 }
