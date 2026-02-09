@@ -53,6 +53,8 @@ pub const MAX_CHUNKS: u16 = 16384;
 // The reed-solomon library requires each shards to be 64 bytes aligned.
 const SHARD_ALIGNMENT: usize = 64;
 
+const PADDING_ALIGNMENT: usize = 4;
+
 #[derive(Clone)]
 pub enum ThreadMode {
 	Multi(Arc<rayon::ThreadPool>),
@@ -142,15 +144,10 @@ pub fn systematic_recovery_threshold(n_chunks: u16) -> Result<u16, Error> {
 ///
 /// Provide a vector containing the first k chunks in order. If too few chunks are provided,
 /// recovery is not possible.
-///
-/// Due to the internals of the erasure coding algorithm, the output might be
-/// larger than the original data and padded with zeroes; passing `data_len`
-/// allows to truncate the output to the original data size.
 pub fn reconstruct_from_systematic<'a>(
 	n_chunks: u16,
 	systematic_len: usize,
 	systematic_chunks: &'a mut impl Iterator<Item = &'a [u8]>,
-	data_len: usize,
 ) -> Result<Vec<u8>, Error> {
 	let k = systematic_recovery_threshold(n_chunks)? as usize;
 	if unlikely(systematic_len < k) {
@@ -170,7 +167,9 @@ pub fn reconstruct_from_systematic<'a>(
 			}
 
 			if unlikely(k == 1) {
-				return Ok(chunk[..data_len].to_vec());
+				let mut result = chunk.to_vec();
+				remove_padding(&mut result);
+				return Ok(result);
 			}
 			bytes = Vec::with_capacity(shard_len * k);
 		}
@@ -187,7 +186,7 @@ pub fn reconstruct_from_systematic<'a>(
 		}
 	}
 
-	bytes.resize(data_len, 0);
+	remove_padding(&mut bytes);
 	Ok(bytes)
 }
 
@@ -203,18 +202,21 @@ pub fn construct_chunks(
 	if unlikely(data.is_empty()) {
 		return Err(Error::BadPayload);
 	}
+
+	let padded = add_padding(data);
+
 	if unlikely(n_chunks == 1) {
-		return Ok(vec![data.to_vec()]);
+		return Ok(vec![padded]);
 	}
 
 	#[cfg(feature = "arena")]
 	{
-		construct_chunks_arena(n_chunks, data, mode)
+		construct_chunks_arena(n_chunks, &padded, mode)
 	}
 
 	#[cfg(not(feature = "arena"))]
 	{
-		construct_chunks_default(n_chunks, data, mode)
+		construct_chunks_default(n_chunks, &padded, mode)
 	}
 }
 
@@ -301,6 +303,32 @@ fn shard_bytes(systematic: u16, data_len: usize) -> usize {
 	next_aligned(shard_bytes, SHARD_ALIGNMENT)
 }
 
+#[inline]
+fn add_padding(data: &[u8]) -> Vec<u8> {
+	let remainder = data.len() % PADDING_ALIGNMENT;
+	let padding_len = if remainder == 0 { PADDING_ALIGNMENT } else { PADDING_ALIGNMENT - remainder };
+	let mut padded = Vec::with_capacity(data.len() + padding_len);
+	padded.extend_from_slice(data);
+	padded.resize(data.len() + padding_len, padding_len as u8);
+	padded
+}
+
+#[inline]
+fn remove_padding(bytes: &mut Vec<u8>) {
+	// Find the last non-zero byte
+	if let Some(last_non_zero) = bytes.iter().rposition(|&b| b != 0) {
+		// Truncate trailing zeros
+		bytes.truncate(last_non_zero + 1);
+		// Last byte is the padding length
+		let padding_len = bytes[last_non_zero] as usize;
+		// Remove padding bytes
+		bytes.truncate(bytes.len().saturating_sub(padding_len));
+	} else {
+		// All zeros — shouldn't happen if padding was added correctly
+		bytes.clear();
+	}
+}
+
 // The reed-solomon library takes sharded data as input.
 fn make_original_shards(
 	original_count: u16,
@@ -371,16 +399,14 @@ fn make_original_shards(
 /// are provided, recovery is not possible.
 ///
 /// Works only for 1..65536 chunks.
-///
-/// Due to the internals of the erasure coding algorithm, the output might be
-/// larger than the original data and padded with zeroes; passing `data_len`
-/// allows to truncate the output to the original data size.
-pub fn reconstruct<I>(n_chunks: u16, chunks: I, data_len: usize) -> Result<Vec<u8>, Error>
+pub fn reconstruct<I>(n_chunks: u16, chunks: I) -> Result<Vec<u8>, Error>
 where
 	I: IntoIterator<Item = (ChunkIndex, Vec<u8>)>,
 {
 	if n_chunks == 1 {
-		return chunks.into_iter().next().map(|(_, v)| v).ok_or(Error::NotEnoughChunks);
+		let mut data = chunks.into_iter().next().map(|(_, v)| v).ok_or(Error::NotEnoughChunks)?;
+		remove_padding(&mut data);
+		return Ok(data);
 	}
 	let n = n_chunks as usize;
 	let original_count = systematic_recovery_threshold(n_chunks)? as usize;
@@ -398,7 +424,13 @@ where
 	let mut recovered =
 		reed_solomon::decode(original_count, recovery_count, original_iter, recovery)?;
 
-	let shard_bytes = shard_bytes(original_count as u16, data_len);
+	let shard_bytes = recovered
+		.values()
+		.next()
+		.or_else(|| original.first().map(|(_, v)| v))
+		.map(|v| v.len())
+		.ok_or(Error::NotEnoughChunks)?;
+
 	let mut bytes = Vec::with_capacity(shard_bytes * original_count);
 
 	let mut original = original.into_iter();
@@ -411,7 +443,7 @@ where
 		bytes.extend_from_slice(chunk.as_slice());
 	}
 
-	bytes.truncate(data_len);
+	remove_padding(&mut bytes);
 
 	Ok(bytes)
 }
@@ -455,7 +487,6 @@ mod tests {
 		fn property(available_data: ArbitraryAvailableData, n_chunks: u16) {
 			let n_chunks = n_chunks.max(1).min(MAX_CHUNKS);
 			let threshold = systematic_recovery_threshold(n_chunks).unwrap();
-			let data_len = available_data.0.len();
 
 			for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
 				let chunks = construct_chunks(n_chunks, &available_data.0, &mode).unwrap();
@@ -464,7 +495,6 @@ mod tests {
 					n_chunks,
 					chunks.len(),
 					&mut chunks.iter().take(threshold as usize).map(Vec::as_slice),
-					data_len,
 				)
 				.unwrap();
 				assert_eq!(reconstructed, available_data.0);
@@ -478,7 +508,6 @@ mod tests {
 	fn round_trip_works() {
 		fn property(available_data: ArbitraryAvailableData, n_chunks: u16) {
 			let n_chunks = n_chunks.max(1).min(MAX_CHUNKS);
-			let data_len = available_data.0.len();
 			let threshold = recovery_threshold(n_chunks).unwrap();
 
 			for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
@@ -489,7 +518,7 @@ mod tests {
 					.map(|(i, v)| (ChunkIndex::from(i as u16), v))
 					.collect();
 				let some_chunks = map.into_iter().take(threshold as usize);
-				let reconstructed: Vec<u8> = reconstruct(n_chunks, some_chunks, data_len).unwrap();
+				let reconstructed: Vec<u8> = reconstruct(n_chunks, some_chunks).unwrap();
 				assert_eq!(reconstructed, available_data.0);
 			}
 		}
@@ -570,9 +599,9 @@ mod tests {
 						.map(|&idx| (ChunkIndex(idx as u16), chunks[idx].clone()))
 						.collect();
 
-					let reconstructed =
-						reconstruct(n_chunks, available_chunks.into_iter(), original_data.len())
-							.unwrap();
+				let reconstructed =
+					reconstruct(n_chunks, available_chunks.into_iter())
+						.unwrap();
 
 					assert_eq!(
 						reconstructed.len(),
@@ -649,5 +678,246 @@ mod tests {
 		assert_eq!(chunks.len(), n_chunks as usize);
 
 		println!("✓ Thread mode configuration test passed!");
+	}
+
+	#[test]
+	fn test_padding_add_remove() {
+		// Alignment 4: data of length 3 → 1 byte of padding [1]
+		let data = vec![10, 20, 30];
+		let padded = add_padding(&data);
+		assert_eq!(padded, vec![10, 20, 30, 1]);
+
+		// Alignment 4: data of length 4 → 4 bytes of padding [4,4,4,4]
+		let data = vec![10, 20, 30, 40];
+		let padded = add_padding(&data);
+		assert_eq!(padded, vec![10, 20, 30, 40, 4, 4, 4, 4]);
+
+		// Alignment 4: data of length 5 → 3 bytes of padding [3,3,3]
+		let data = vec![1, 2, 3, 4, 5];
+		let padded = add_padding(&data);
+		assert_eq!(padded, vec![1, 2, 3, 4, 5, 3, 3, 3]);
+
+		// Alignment 4: data of length 1 → 3 bytes of padding [3,3,3]
+		let data = vec![42];
+		let padded = add_padding(&data);
+		assert_eq!(padded, vec![42, 3, 3, 3]);
+
+		// Test remove_padding reverses add_padding
+		for len in 1..=20 {
+			let data: Vec<u8> = (0..len).map(|i| (i * 7 + 13) as u8).collect();
+			let mut padded = add_padding(&data);
+			// Simulate trailing zeros from reed-solomon
+			padded.extend_from_slice(&[0u8; 100]);
+			remove_padding(&mut padded);
+			assert_eq!(padded, data, "Round-trip failed for data length {}", len);
+		}
+	}
+
+	#[test]
+	fn test_padding_data_ending_with_zeros() {
+		// Data consisting entirely of zeros
+		for len in 1..=16 {
+			let data = vec![0u8; len];
+
+			for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
+				let n_chunks = 4u16;
+				let chunks = construct_chunks(n_chunks, &data, &mode).unwrap();
+
+				// Test reconstruct_from_systematic
+				let systematic = systematic_recovery_threshold(n_chunks).unwrap() as usize;
+				let reconstructed_sys = reconstruct_from_systematic(
+					n_chunks,
+					chunks.len(),
+					&mut chunks.iter().take(systematic).map(Vec::as_slice),
+				)
+				.unwrap();
+				assert_eq!(
+					reconstructed_sys, data,
+					"Systematic failed for zero-data of length {} (mode: {:?})",
+					len, mode.num_threads()
+				);
+
+				// Test reconstruct
+				let threshold = recovery_threshold(n_chunks).unwrap();
+				let map: HashMap<ChunkIndex, Vec<u8>> = chunks
+					.into_iter()
+					.enumerate()
+					.take(threshold as usize)
+					.map(|(i, v)| (ChunkIndex::from(i as u16), v))
+					.collect();
+				let reconstructed = reconstruct(n_chunks, map.into_iter()).unwrap();
+				assert_eq!(
+					reconstructed, data,
+					"Reconstruct failed for zero-data of length {} (mode: {:?})",
+					len, mode.num_threads()
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_padding_aligned_and_unaligned_data() {
+		// Test various data lengths: multiples of 4 and non-multiples
+		let test_sizes = vec![
+			1, 2, 3, 4, 5, 6, 7, 8,
+			15, 16, 17,
+			63, 64, 65,
+			100, 127, 128, 129,
+			255, 256, 257,
+			1000, 1023, 1024, 1025,
+		];
+
+		for data_len in test_sizes {
+			let original_data: Vec<u8> = (0..data_len).map(|i| (i % 256) as u8).collect();
+
+			for n_chunks in [2u16, 4, 8, 16] {
+				for mode in [ThreadMode::single(), ThreadMode::multi_with_num_threads(None).unwrap()] {
+					let chunks = construct_chunks(n_chunks, &original_data, &mode).unwrap();
+
+					// Test reconstruct_from_systematic
+					let systematic = systematic_recovery_threshold(n_chunks).unwrap() as usize;
+					let reconstructed_sys = reconstruct_from_systematic(
+						n_chunks,
+						chunks.len(),
+						&mut chunks.iter().take(systematic).map(Vec::as_slice),
+					)
+					.unwrap();
+					assert_eq!(
+						reconstructed_sys, original_data,
+						"Systematic failed: data_len={}, n_chunks={}",
+						data_len, n_chunks
+					);
+
+					// Test reconstruct
+					let threshold = recovery_threshold(n_chunks).unwrap();
+					let map: HashMap<ChunkIndex, Vec<u8>> = chunks
+						.into_iter()
+						.enumerate()
+						.take(threshold as usize)
+						.map(|(i, v)| (ChunkIndex::from(i as u16), v))
+						.collect();
+					let reconstructed = reconstruct(n_chunks, map.into_iter()).unwrap();
+					assert_eq!(
+						reconstructed, original_data,
+						"Reconstruct failed: data_len={}, n_chunks={}",
+						data_len, n_chunks
+					);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_padding_data_with_padding_like_values() {
+		// Data ending with bytes that look like padding values [4,4,4,4]
+		let data = vec![4u8; 4];
+		for n_chunks in [2u16, 4, 8] {
+			let mode = ThreadMode::single();
+			let chunks = construct_chunks(n_chunks, &data, &mode).unwrap();
+			let threshold = recovery_threshold(n_chunks).unwrap();
+			let map: HashMap<ChunkIndex, Vec<u8>> = chunks
+				.into_iter()
+				.enumerate()
+				.take(threshold as usize)
+				.map(|(i, v)| (ChunkIndex::from(i as u16), v))
+				.collect();
+			let reconstructed = reconstruct(n_chunks, map.into_iter()).unwrap();
+			assert_eq!(reconstructed, data, "Failed for data=[4,4,4,4], n_chunks={}", n_chunks);
+		}
+
+		// Data ending with [1]
+		let data = vec![1u8];
+		for n_chunks in [2u16, 4, 8] {
+			let mode = ThreadMode::single();
+			let chunks = construct_chunks(n_chunks, &data, &mode).unwrap();
+			let threshold = recovery_threshold(n_chunks).unwrap();
+			let map: HashMap<ChunkIndex, Vec<u8>> = chunks
+				.into_iter()
+				.enumerate()
+				.take(threshold as usize)
+				.map(|(i, v)| (ChunkIndex::from(i as u16), v))
+				.collect();
+			let reconstructed = reconstruct(n_chunks, map.into_iter()).unwrap();
+			assert_eq!(reconstructed, data, "Failed for data=[1], n_chunks={}", n_chunks);
+		}
+
+		// Data ending with [3, 3, 3]
+		let data = vec![3u8; 3];
+		for n_chunks in [2u16, 4, 8] {
+			let mode = ThreadMode::single();
+			let chunks = construct_chunks(n_chunks, &data, &mode).unwrap();
+			let threshold = recovery_threshold(n_chunks).unwrap();
+			let map: HashMap<ChunkIndex, Vec<u8>> = chunks
+				.into_iter()
+				.enumerate()
+				.take(threshold as usize)
+				.map(|(i, v)| (ChunkIndex::from(i as u16), v))
+				.collect();
+			let reconstructed = reconstruct(n_chunks, map.into_iter()).unwrap();
+			assert_eq!(reconstructed, data, "Failed for data=[3,3,3], n_chunks={}", n_chunks);
+		}
+	}
+
+	#[test]
+	fn test_padding_random_data() {
+		use rand::{Rng, SeedableRng};
+
+		let mut rng = rand::rngs::SmallRng::seed_from_u64(12345);
+
+		for _ in 0..50 {
+			let data_len = rng.gen_range(1..=4096);
+			let original_data: Vec<u8> = (0..data_len).map(|_| rng.gen()).collect();
+			let n_chunks = [2u16, 4, 8, 16, 32][rng.gen_range(0..5)];
+
+			let mode = ThreadMode::single();
+			let chunks = construct_chunks(n_chunks, &original_data, &mode).unwrap();
+
+			// Test reconstruct_from_systematic
+			let systematic = systematic_recovery_threshold(n_chunks).unwrap() as usize;
+			let reconstructed_sys = reconstruct_from_systematic(
+				n_chunks,
+				chunks.len(),
+				&mut chunks.iter().take(systematic).map(Vec::as_slice),
+			)
+			.unwrap();
+			assert_eq!(
+				reconstructed_sys, original_data,
+				"Systematic failed: data_len={}, n_chunks={}",
+				data_len, n_chunks
+			);
+
+			// Test reconstruct
+			let threshold = recovery_threshold(n_chunks).unwrap();
+			let map: HashMap<ChunkIndex, Vec<u8>> = chunks
+				.into_iter()
+				.enumerate()
+				.take(threshold as usize)
+				.map(|(i, v)| (ChunkIndex::from(i as u16), v))
+				.collect();
+			let reconstructed = reconstruct(n_chunks, map.into_iter()).unwrap();
+			assert_eq!(
+				reconstructed, original_data,
+				"Reconstruct failed: data_len={}, n_chunks={}",
+				data_len, n_chunks
+			);
+		}
+	}
+
+	#[test]
+	fn test_padding_single_chunk() {
+		// n_chunks == 1: special case
+		let data = vec![1, 2, 3, 4, 5];
+		let mode = ThreadMode::single();
+		let chunks = construct_chunks(1, &data, &mode).unwrap();
+		assert_eq!(chunks.len(), 1);
+
+		// reconstruct with n_chunks == 1
+		let map: HashMap<ChunkIndex, Vec<u8>> = chunks
+			.into_iter()
+			.enumerate()
+			.map(|(i, v)| (ChunkIndex::from(i as u16), v))
+			.collect();
+		let reconstructed = reconstruct(1, map.into_iter()).unwrap();
+		assert_eq!(reconstructed, data);
 	}
 }
